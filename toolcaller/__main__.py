@@ -135,7 +135,13 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument(
         "--stream",
         action="store_true",
-        help="Stream from the server and print chunks as they arrive",
+        default=True,
+        help="Stream from the server and print chunks as they arrive (default)",
+    )
+    srv.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Disable streaming (wait for full response)",
     )
     srv.add_argument(
         "--max-tokens",
@@ -530,18 +536,20 @@ def cmd_complete(args: argparse.Namespace, request: Dict[str, Any]) -> str:
         print(render.prompt, file=sys.stderr)
         print("----- end prompt -----", file=sys.stderr)
 
+    do_stream = args.stream and not args.no_stream
+
     def on_chunk(chunk: str) -> None:
-        if args.stream and not args.quiet:
+        if do_stream and not args.quiet:
             sys.stderr.write(chunk)
             sys.stderr.flush()
 
     result = pipeline.complete(
         request,
-        on_chunk=on_chunk if args.stream else None,
-        stream=args.stream,
+        on_chunk=on_chunk if do_stream else None,
+        stream=do_stream,
         strict_parse=False,
     )
-    if args.stream and not args.quiet:
+    if do_stream and not args.quiet:
         sys.stderr.write("\n")
 
     if args.debug or (result.warnings and not args.quiet):
