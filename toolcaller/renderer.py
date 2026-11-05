@@ -239,6 +239,7 @@ class PromptRenderer:
             tools,
             template_kwargs=template_kwargs,
             now=now,
+            request=request,
         )
         warnings: List[str] = []
 
@@ -246,7 +247,7 @@ class PromptRenderer:
         generation_prompt = ""
         if generation_prompt_diff:
             base_context = self._build_context(
-                chat_messages, tools, template_kwargs=template_kwargs, now=now
+                chat_messages, tools, template_kwargs=template_kwargs, now=now, request=request
             )
             base_context.pop("add_generation_prompt", None)
             try:
@@ -293,6 +294,7 @@ class PromptRenderer:
         *,
         template_kwargs: Optional[Dict[str, Any]],
         now: Optional[_datetime.datetime],
+        request: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         context: Dict[str, Any] = {
             "messages": messages_to_json(
@@ -306,7 +308,16 @@ class PromptRenderer:
         if tools:
             context["tools"] = _tools_to_json(tools)
         if self.caps.supports_enable_thinking:
+            # Default: thinking on.  Can be overridden by request-level
+            # reasoning_effort ("none" => off, "low"/"high" => on) or by
+            # template_kwargs / default_template_kwargs.
             context["enable_thinking"] = True
+            if request is not None:
+                reasoning_effort = request.get("reasoning_effort")
+                if reasoning_effort == "none":
+                    context["enable_thinking"] = False
+                elif reasoning_effort in ("low", "high"):
+                    context["reasoning_effort"] = reasoning_effort
         context.update(self.extra_context if now is None else _extra_context(now))
         kwargs = dict(self.default_template_kwargs)
         if template_kwargs:

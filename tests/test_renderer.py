@@ -17,6 +17,7 @@ from toolcaller.renderer import (
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QWEN_TEMPLATE = os.path.join(HERE, "chat_template.jinja")
+SPARK_TEMPLATE = os.path.join(HERE, "spark.j")
 
 CHATML = (
     "{%- for message in messages -%}"
@@ -359,3 +360,52 @@ class TestQwenTemplate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReasoningEffort(unittest.TestCase):
+    """reasoning_effort in request maps to enable_thinking / reasoning_effort context."""
+
+    def _make_renderer(self):
+        from toolcaller.renderer import PromptRenderer
+        from toolcaller.environment import load_template_file
+
+        env = load_template_file(SPARK_TEMPLATE)
+        return PromptRenderer(
+            env=env,
+            bos_token="<｜start▁of▁sentence｜>",
+            eos_token="<｜end▁of▁sentence｜>",
+            strict=True,
+        )
+
+    def test_default_thinking_on(self):
+        r = self._make_renderer()
+        ctx = r._build_context([], [], request={"messages": []}, template_kwargs=None, now=None)
+        self.assertTrue(ctx["enable_thinking"])
+
+    def test_reasoning_effort_none(self):
+        r = self._make_renderer()
+        ctx = r._build_context([], [], request={"messages": [], "reasoning_effort": "none"}, template_kwargs=None, now=None)
+        self.assertFalse(ctx["enable_thinking"])
+
+    def test_reasoning_effort_low(self):
+        r = self._make_renderer()
+        ctx = r._build_context([], [], request={"messages": [], "reasoning_effort": "low"}, template_kwargs=None, now=None)
+        self.assertTrue(ctx["enable_thinking"])
+        self.assertEqual(ctx["reasoning_effort"], "low")
+
+    def test_reasoning_effort_high(self):
+        r = self._make_renderer()
+        ctx = r._build_context([], [], request={"messages": [], "reasoning_effort": "high"}, template_kwargs=None, now=None)
+        self.assertTrue(ctx["enable_thinking"])
+        self.assertEqual(ctx["reasoning_effort"], "high")
+
+    def test_template_kwargs_override(self):
+        r = self._make_renderer()
+        # template_kwargs can force enable_thinking off even with default reasoning_effort
+        ctx = r._build_context(
+            [], [],
+            request={"messages": []},
+            template_kwargs={"enable_thinking": False},
+            now=None,
+        )
+        self.assertFalse(ctx["enable_thinking"])
