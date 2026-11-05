@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toolcaller"
+version = "1.0.0"
+description = "OpenAI chat completions with jinja templates and tool-call parsing on raw llama.cpp /completion endpoints"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "jinja2>=3.0",
+    "requests>=2.20",
+]
+
+[project.scripts]
+toolcaller = "toolcaller.__main__:main"
+
+[tool.setuptools]
+packages = ["toolcaller"]

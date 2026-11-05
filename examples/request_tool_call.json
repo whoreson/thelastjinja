@@ -1,0 +1,26 @@
+{
+  "model": "Qwen3.6-27B",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant with access to tools."},
+    {"role": "user", "content": "What is the weather in Budapest and in Vienna? Call both tools."}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "City name, e.g. Budapest"}
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "temperature": 0,
+  "max_tokens": 400,
+  "parallel_tool_calls": true
+}
