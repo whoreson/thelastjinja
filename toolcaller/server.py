@@ -22,6 +22,7 @@ import json
 import logging
 import mimetypes
 import os
+import queue
 import sys
 import threading
 import time
@@ -197,11 +198,19 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._json_response(500, {"error": f"internal error: {exc}"})
 
     def _stream_response(self, request: Dict, pipeline: ChatPipeline):
-        """Stream response as SSE (server-sent events)."""
+        """Stream response as SSE (server-sent events).
+
+        The backend /completion stream is consumed in a worker thread.
+        Chunks are pushed into a queue that the main handler drains and
+        writes to the client — so the client sees tokens as they arrive,
+        not after the model finishes.
+        """
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         cancel = threading.Event()
+        q: "queue.Queue" = queue.Queue(maxsize=256)
+        done = threading.Event()
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -211,54 +220,136 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._apply_cors_headers()
         self.end_headers()
 
+        def worker():
+            """Consume the backend stream and enqueue parsed chunks."""
+            try:
+                result = pipeline.complete(
+                    request,
+                    stream=True,
+                    strict_parse=False,
+                    cancel=cancel,
+                    on_chunk=lambda chunk: q.put(chunk),
+                )
+                q.put(result)  # sentinel: the ChatResult
+            except Exception as exc:
+                q.put(exc)  # sentinel: the error
+            finally:
+                done.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        # Drain the queue and write SSE to the client.
         try:
-            start = time.time()
-            result = pipeline.complete(request, stream=True, strict_parse=False, cancel=cancel)
-            elapsed = time.time() - start
-
-            if result.completion.cancelled:
-                return  # client already gone
-
-            # Determine model name from the result
-            model_name = result.model or "unknown"
-
-            chunks = result.stream_chunks(
-                request_id=request_id,
-                created=created,
-                model=model_name,
-            )
-
-            for chunk in chunks:
-                line = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                self.wfile.write(line.encode("utf-8"))
-                self.wfile.flush()
-
-            # Final [DONE]
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-
+            self._drain_sse_queue(q, done, cancel, request_id, created)
         except BrokenPipeError:
-            cancel.set()  # abort the backend immediately
+            cancel.set()
         except ConnectionResetError:
             cancel.set()
-        except ConfigError as exc:
-            cancel.set()
-            err = json.dumps({"error": str(exc)}, ensure_ascii=False)
-            self.wfile.write(f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8"))
-            self.wfile.flush()
-        except ServerError as exc:
-            cancel.set()
-            err = json.dumps({"error": f"upstream error: {exc}"}, ensure_ascii=False)
-            self.wfile.write(f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8"))
-            self.wfile.flush()
         except Exception as exc:
             cancel.set()
             logger.exception("unhandled error in streaming chat completion")
-            err = json.dumps({"error": f"internal error: {exc}"}, ensure_ascii=False)
-            self.wfile.write(f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8"))
-            self.wfile.flush()
 
     # -- helpers ----------------------------------------------------------
+
+    def _drain_sse_queue(
+        self,
+        q: "queue.Queue",
+        done: threading.Event,
+        cancel: threading.Event,
+        request_id: str,
+        created: int,
+    ):
+        """Drain items from the worker's queue and write SSE to the client.
+
+        Raw text chunks (str) are forwarded immediately as content deltas
+        so the client sees tokens as they arrive.  When the worker finishes,
+        the ChatResult sentinel is sent; if it contains tool calls they are
+        appended as additional chunks.
+        """
+        model_name: Optional[str] = "unknown"
+        content_sent: List[str] = []  # track what we already streamed
+
+        def sse_write(data: Any) -> None:
+            line = f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
+        # Initial role chunk
+        sse_write({
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": "",
+            "choices": [{"index": 0, "delta": {"role": "assistant"}}],
+        })
+
+        while True:
+            if cancel.is_set():
+                return
+            try:
+                item = q.get(timeout=0.5)
+            except queue.Empty:
+                if done.is_set():
+                    continue
+                continue
+
+            # Sentinel: Exception from the worker.
+            if isinstance(item, Exception):
+                sse_write({"error": str(item)})
+                sse_write("[DONE]")
+                return
+
+            # Sentinel: ChatResult (worker finished).
+            from .api import ChatResult
+            if isinstance(item, ChatResult):
+                result = item
+                model_name = result.model or "unknown"
+                if result.completion.cancelled:
+                    sse_write("[DONE]")
+                    return
+                # Send any tool calls that weren't in the raw text stream.
+                for call in result.parsed.tool_calls:
+                    sse_write({
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [{
+                            "index": 0,
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(
+                                    call.arguments,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }]}}],
+                    })
+                # Finish.
+                sse_write({
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": result.finish_reason}],
+                })
+                sse_write("[DONE]")
+                return
+
+            # Regular text chunk from on_chunk callback.
+            if isinstance(item, str):
+                content_sent.append(item)
+                sse_write({
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": {"content": item}}],
+                })
 
     def _upstream_ok(self) -> str:
         try:
