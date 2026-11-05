@@ -458,3 +458,51 @@ class TestCancellation(unittest.TestCase):
         client = CompletionClient("http://x", session=session)
         result = client.complete("p", cancel=cancel)
         self.assertTrue(result.cancelled)
+
+
+class TestStopTypeParsing(unittest.TestCase):
+    """PicoLM uses stop_type string instead of stopped_eos/word/limit booleans."""
+
+    def _make_result(self, payload: dict) -> Any:
+        from toolcaller.client import CompletionClient
+        client = CompletionClient("http://x")
+        client._tokenize_supported = True
+        return client._parse_response(payload)
+
+    def test_stop_type_eos(self):
+        r = self._make_result({"content": "hi", "stop_type": "eos"})
+        self.assertTrue(r.stopped_eos)
+        self.assertEqual(r.finish_reason, "stop")
+
+    def test_stop_type_word(self):
+        r = self._make_result({"content": "hello", "stop_type": "word", "stopping_word": "END"})
+        self.assertTrue(r.stopped_word)
+        self.assertEqual(r.stop_word, "END")
+        self.assertEqual(r.finish_reason, "stop")
+
+    def test_stop_type_limit(self):
+        r = self._make_result({"content": "hello world", "stop_type": "limit"})
+        self.assertTrue(r.stopped_limit)
+        self.assertEqual(r.finish_reason, "length")
+
+    def test_stop_type_none_with_content(self):
+        # PicoLM streaming final event can report "none" when hitting token limit.
+        r = self._make_result({"content": "generated text", "stop_type": "none", "tokens_evaluated": 10})
+        self.assertTrue(r.stopped_limit)
+        self.assertEqual(r.finish_reason, "length")
+
+    def test_stop_type_none_empty_content(self):
+        # Empty content with "none" should not be treated as limit.
+        r = self._make_result({"content": "", "stop_type": "none"})
+        self.assertFalse(r.stopped_limit)
+        self.assertEqual(r.finish_reason, "length")
+
+    def test_legacy_booleans_still_work(self):
+        # llama.cpp style booleans still take precedence.
+        r = self._make_result({"content": "x", "stopped_eos": True})
+        self.assertTrue(r.stopped_eos)
+
+    def test_legacy_booleans_word(self):
+        r = self._make_result({"content": "x", "stopped_word": True, "stopping_word": "STOP"})
+        self.assertTrue(r.stopped_word)
+        self.assertEqual(r.stop_word, "STOP")

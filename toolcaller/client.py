@@ -429,6 +429,21 @@ class CompletionClient:
         stopped_limit = bool(payload.get("stopped_limit", False))
         stop_word = payload.get("stopping_word") or payload.get("stop_word") or ""
 
+        # PicoLM uses stop_type string instead of individual booleans.
+        stop_type = payload.get("stop_type")
+        if isinstance(stop_type, str) and not (stopped_eos or stopped_word or stopped_limit):
+            if stop_type == "eos":
+                stopped_eos = True
+            elif stop_type == "word":
+                stopped_word = True
+            elif stop_type == "limit":
+                stopped_limit = True
+            elif stop_type == "none":
+                # PicoLM streaming final event may report "none" when it
+                # actually hit the token limit.  Treat any non-empty
+                # generation with no stop-word as length-limited.
+                stopped_limit = bool(content)
+
         # When streaming, llama.cpp reports the reconstructed content only in
         # the final event; if the final event is missing we cannot know which
         # stop word fired.
