@@ -28,6 +28,18 @@ class FakeResponse:
             raise ValueError("not json")
         return self._payload
 
+    @property
+    def content(self) -> bytes:
+        return self.text.encode("utf-8")
+
+    def iter_content(self, chunk_size=8192):
+        raw = self.content
+        start = 0
+        while start < len(raw):
+            end = start + chunk_size
+            yield raw[start:end]
+            start = end
+
     def iter_lines(self, decode_unicode: bool = False):
         for line in self._lines:
             yield line
@@ -405,3 +417,44 @@ class TestStripGenerationThinking(unittest.TestCase):
         result = pipe.complete({"messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(result.parsed.reasoning_content, "7*6=42")
         self.assertEqual(result.message["content"], "42")
+
+
+class TestCancellation(unittest.TestCase):
+    def test_cancel_during_stream(self):
+        """When cancel event fires mid-stream, client closes and returns cancelled."""
+        import threading
+
+        cancel = threading.Event()
+        cancel.set()  # pre-set so cancel is detected on first iteration
+        lines = [
+            "data: {\"content\": \"hello\"}",
+            "",
+            "data: {\"content\": \" world\"}",
+            "",
+        ]
+        resp = FakeResponse({"content": "hello world"}, lines=lines)
+        session = FakeSession([resp])
+        client = CompletionClient("http://x", session=session)
+        result = client.complete_stream("p", cancel=cancel)
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.finish_reason, "stop")
+
+    def test_cancel_during_nonstream(self):
+        import threading
+        cancel = threading.Event()
+        cancel.set()  # pre-cancel
+        resp = FakeResponse({"content": "hi", "stopped_eos": True})
+        session = FakeSession([resp])
+        client = CompletionClient("http://x", session=session)
+        result = client.complete("p", cancel=cancel)
+        self.assertTrue(result.cancelled)
+
+    def test_cancel_iter_content(self):
+        import threading
+        cancel = threading.Event()
+        cancel.set()  # fire immediately so iter_content bails
+        resp = FakeResponse({"content": "big response", "stopped_eos": True})
+        session = FakeSession([resp])
+        client = CompletionClient("http://x", session=session)
+        result = client.complete("p", cancel=cancel)
+        self.assertTrue(result.cancelled)

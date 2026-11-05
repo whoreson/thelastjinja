@@ -18,11 +18,17 @@ output has to be reconstructed: ``text + stopped_word + eos_token?``.
 Streaming (``stream: true``) via server-sent events is supported as well and
 handles both plain ``"content"`` chunks and llama.cpp's
 ``{"content": "..."}`` SSE format.
+
+**Cancellation.**  All completion methods accept an optional
+``threading.Event`` as ``cancel``.  When set, the client closes the
+in-flight response immediately and returns a ``CompletionResult`` with
+a ``cancelled`` warning so the upstream model stops spinning.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
@@ -54,9 +60,12 @@ class CompletionResult:
     timings: Dict[str, Any] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    cancelled: bool = False
 
     @property
     def finish_reason(self) -> str:
+        if self.cancelled:
+            return "stop"
         if self.stopped_eos or self.stopped_word:
             return "stop"
         return "length"
@@ -171,6 +180,7 @@ class CompletionClient:
         sampling: Optional[Dict[str, Any]] = None,
         cache_prompt: bool = True,
         id_slot: int = -1,
+        cancel: Optional[threading.Event] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> CompletionResult:
         body = self._build_body(
@@ -187,7 +197,12 @@ class CompletionClient:
             stream=False,
             extra=extra,
         )
-        payload = self._post_json(self.completion_url, body)
+        try:
+            payload = self._post_json(self.completion_url, body, cancel=cancel)
+        except _Cancelled:
+            return self._cancelled_result()
+        if cancel and cancel.is_set():
+            return self._cancelled_result()
         return self._parse_response(payload)
 
     # -- completion (streaming) -------------------------------------------
@@ -205,6 +220,7 @@ class CompletionClient:
         sampling: Optional[Dict[str, Any]] = None,
         cache_prompt: bool = True,
         id_slot: int = -1,
+        cancel: Optional[threading.Event] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> CompletionResult:
         body = self._build_body(
@@ -237,7 +253,10 @@ class CompletionClient:
         if response.status_code >= 400:
             raise ServerError(self._http_error_message(response))
         try:
-            for event in self._iter_sse(response):
+            for event in self._iter_sse(response, cancel=cancel):
+                if cancel and cancel.is_set():
+                    response.close()
+                    return self._cancelled_result("".join(pieces))
                 if not isinstance(event, dict):
                     continue
                 if "error" in event:
@@ -254,6 +273,9 @@ class CompletionClient:
         finally:
             response.close()
 
+        if cancel and cancel.is_set():
+            return self._cancelled_result("".join(pieces))
+
         streamed_text = "".join(pieces)
         # The final event carries the authoritative `content` (stop word and
         # EOS already stripped).  Fall back to the concatenated chunks when the
@@ -263,6 +285,15 @@ class CompletionClient:
         return self._parse_response(final, streamed_text=streamed_text)
 
     # -- helpers -----------------------------------------------------------
+    def _cancelled_result(self, partial_text: str = "") -> CompletionResult:
+        """Return a CompletionResult indicating client cancellation."""
+        return CompletionResult(
+            text=partial_text,
+            content=partial_text,
+            cancelled=True,
+            warnings=["request cancelled (client disconnected)"],
+        )
+
     def _build_body(
         self,
         prompt: str,
@@ -306,7 +337,7 @@ class CompletionClient:
             body.update(extra)
         return body
 
-    def _post_json(self, url: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_json(self, url: str, body: Dict[str, Any], *, cancel: Optional[threading.Event] = None) -> Dict[str, Any]:
         try:
             response = self.session.post(url, json=body, timeout=self.timeout)
         except requests.RequestException as exc:
@@ -314,7 +345,21 @@ class CompletionClient:
         if response.status_code >= 400:
             raise ServerError(self._http_error_message(response))
         try:
-            payload = response.json()
+            # If cancellation is requested, read in chunks so we can bail early.
+            if cancel:
+                chunks: List[bytes] = []
+                for chunk in response.iter_content(chunk_size=8192):
+                    if cancel.is_set():
+                        response.close()
+                        raise _Cancelled()
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+            else:
+                raw = response.content
+        finally:
+            response.close()
+        try:
+            payload = json.loads(raw)
         except ValueError as exc:
             raise ServerError(f"POST {url}: invalid JSON response: {exc}") from exc
         if isinstance(payload, dict) and "error" in payload:
@@ -339,9 +384,11 @@ class CompletionClient:
         return f"HTTP {response.status_code}: {text[:800]}"
 
     @staticmethod
-    def _iter_sse(response: "requests.Response") -> Iterator[Any]:
+    def _iter_sse(response: "requests.Response", *, cancel: Optional[threading.Event] = None) -> Iterator[Any]:
         data_lines: List[str] = []
         for raw_line in response.iter_lines(decode_unicode=True):
+            if cancel and cancel.is_set():
+                return
             if raw_line is None:
                 continue
             line = raw_line.rstrip("\r")
@@ -424,6 +471,11 @@ def _decode_sse_payload(chunk: str) -> Iterator[Any]:
     except ValueError:
         # Bare text stream (some servers stream plain tokens).
         yield {"content": chunk}
+
+
+class _Cancelled(Exception):
+    """Internal marker: the caller requested cancellation."""
+    pass
 
 
 def format_timings(timings: Dict[str, Any]) -> str:

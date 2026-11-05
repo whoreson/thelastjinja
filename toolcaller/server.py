@@ -172,16 +172,22 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._nonstream_response(request, pipeline)
 
     def _nonstream_response(self, request: Dict, pipeline: ChatPipeline):
+        cancel = threading.Event()
         try:
             start = time.time()
-            result = pipeline.complete(request, strict_parse=False)
+            result = pipeline.complete(request, strict_parse=False, cancel=cancel)
             elapsed = time.time() - start
+
+            if result.completion.cancelled:
+                return  # client already gone, nothing to write
 
             response = result.to_response(include_timings=True)
             response["elapsed"] = round(elapsed, 3)
 
             self._json_response(200, response)
 
+        except BrokenPipeError:
+            cancel.set()  # abort the backend
         except ConfigError as exc:
             self._json_response(400, {"error": str(exc)})
         except ServerError as exc:
@@ -195,6 +201,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
+        cancel = threading.Event()
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -206,8 +213,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         try:
             start = time.time()
-            result = pipeline.complete(request, stream=True, strict_parse=False)
+            result = pipeline.complete(request, stream=True, strict_parse=False, cancel=cancel)
             elapsed = time.time() - start
+
+            if result.completion.cancelled:
+                return  # client already gone
 
             # Determine model name from the result
             model_name = result.model or "unknown"
@@ -227,15 +237,22 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
+        except BrokenPipeError:
+            cancel.set()  # abort the backend immediately
+        except ConnectionResetError:
+            cancel.set()
         except ConfigError as exc:
+            cancel.set()
             err = json.dumps({"error": str(exc)}, ensure_ascii=False)
             self.wfile.write(f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8"))
             self.wfile.flush()
         except ServerError as exc:
+            cancel.set()
             err = json.dumps({"error": f"upstream error: {exc}"}, ensure_ascii=False)
             self.wfile.write(f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8"))
             self.wfile.flush()
         except Exception as exc:
+            cancel.set()
             logger.exception("unhandled error in streaming chat completion")
             err = json.dumps({"error": f"internal error: {exc}"}, ensure_ascii=False)
             self.wfile.write(f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8"))

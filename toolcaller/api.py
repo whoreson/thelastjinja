@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -345,6 +346,7 @@ class ChatPipeline:
         stream: bool = False,
         strict_parse: bool = False,
         raise_on_parse_error: bool = True,
+        cancel: Optional[threading.Event] = None,
     ) -> ChatResult:
         started = time.time()
         request = normalize_request(request)
@@ -406,6 +408,7 @@ class ChatPipeline:
             sampling=sampling,
             stream=stream,
             on_chunk=on_chunk,
+            cancel=cancel,
         )
         warnings.extend(completion.warnings)
 
@@ -495,6 +498,7 @@ class ChatPipeline:
         sampling: Optional[Dict[str, Any]],
         stream: bool,
         on_chunk: Optional[Callable[[str], None]],
+        cancel: Optional[threading.Event] = None,
     ) -> CompletionResult:
         sampling_params = _sampling_from_request(request)
         if sampling:
@@ -527,6 +531,7 @@ class ChatPipeline:
                 grammar_triggers=triggers,
                 preserved_tokens=preserved,
                 sampling=sampling_params,
+                cancel=cancel,
             )
         return self.client.complete(
             prompt,
@@ -536,6 +541,7 @@ class ChatPipeline:
             grammar_triggers=triggers,
             preserved_tokens=preserved,
             sampling=sampling_params,
+            cancel=cancel,
         )
 
     # -- misc --------------------------------------------------------------
