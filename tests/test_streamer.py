@@ -182,10 +182,32 @@ class TestIncrementalArguments(unittest.TestCase):
         self.assertEqual(json.loads(accumulated), {"city": "Budapest"})
 
     def test_truncated_call_still_terminates(self):
+        # The value was streamed as an open JSON string before the stream was
+        # cut, so the client ends up with the string form "1" (deltas are
+        # append-only and cannot be retyped to the number 1).
         text = "<tool_call>f<arg_key>a</arg_key><arg_value>1"
         events = run(text, "spark")
         self.assertEqual([s[2] for s in tool_starts(events)], ["f"])
-        self.assertEqual(json.loads(tool_args(events)[0]), {"a": 1})
+        self.assertEqual(json.loads(tool_args(events)[0]), {"a": "1"})
+
+    def test_arguments_stream_before_the_closing_tag(self):
+        """Argument values reach the client while they are still being written."""
+        parser = IncrementalStreamParser(
+            get_profile("spark"), reasoning_prefilled=True
+        )
+        events = []
+        for piece in [
+            "<tool_call>", "get_weather", "<arg_key>city</arg_key>",
+            "<arg_value>Bud", "apest", "</arg_value>", "</tool_call>",
+        ]:
+            events.extend(parser.feed(piece))
+        events.extend(parser.finalize())
+
+        args = tool_args(events)[0]
+        self.assertIn("Bud", args, "partial value must be streamed")
+        self.assertEqual(json.loads(args), {"city": "Budapest"})
+        # The closing tag must not appear in the accumulated arguments.
+        self.assertNotIn("arg_value", args)
 
 
 class TestMarkerSplitAcrossChunks(unittest.TestCase):

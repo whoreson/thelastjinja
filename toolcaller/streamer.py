@@ -395,8 +395,16 @@ class IncrementalStreamParser:
         serialized = self._serialize_args(self._call_buf, final=final)
         if serialized is None:
             return
-        # Ignore serializations that are not an extension of the text already
-        # sent; emitting a diverging prefix would corrupt the client's buffer.
+        if final and not serialized.startswith(self._args_committed):
+            # Deltas are append-only, so a value that was already streamed as an
+            # open string cannot be retyped (``"3`` -> ``3``) without rewriting
+            # bytes the client has.  Keep the streamed form and just close it so
+            # the accumulated JSON parses.  Values are therefore strings on the
+            # streaming path when they arrive as scalars; anything structured
+            # (objects/arrays, hermes-style JSON args) is unaffected.
+            serialized = _close_open_json(self._args_committed)
+        # Deltas are append-only: only an extension of what was already sent can
+        # be emitted.
         if not serialized.startswith(self._args_committed):
             return
         if len(serialized) > len(self._args_committed):
@@ -563,8 +571,11 @@ class IncrementalStreamParser:
             val_start = name_end + len(name_term)
             ve = body.find(key_close, val_start)
             if ve == -1:
-                if final and key:
-                    pairs.append((key, _xml_value(body[val_start:])))
+                # Value still being generated (see _paired_pairs).
+                if key:
+                    raw = _strip_partial_marker(body[val_start:], key_close)
+                    value = _xml_value(raw) if final else _xml_partial_value(raw)
+                    pairs.append((key, value))
                 break
             if key:
                 pairs.append((key, _xml_value(body[val_start:ve])))
@@ -595,8 +606,17 @@ class IncrementalStreamParser:
                 break
             ve = body.find(val_close, vo + len(val_open))
             if ve == -1:
-                if final and key:
-                    pairs.append((key, _xml_value(body[vo + len(val_open):])))
+                # Value still being generated: emit it as a growing string so
+                # the client sees arguments arrive token by token instead of
+                # only after the closing tag.  A trailing partial terminator
+                # ("</arg_val" on its way to "</arg_value>") must not be
+                # mistaken for value text.
+                if key:
+                    raw = _strip_partial_marker(
+                        body[vo + len(val_open):], val_close
+                    )
+                    value = _xml_value(raw) if final else _xml_partial_value(raw)
+                    pairs.append((key, value))
                 break
             if key:
                 pairs.append((key, _xml_value(body[vo + len(val_open):ve])))
@@ -747,6 +767,53 @@ def _xml_value(raw: str) -> Any:
     return clean_xml_value(raw)
 
 
+def _close_open_json(text: str) -> str:
+    """Close an open-string JSON object produced by :func:`_pairs_to_json`.
+
+    Used when the last value was streamed as an open string and the call ends
+    before the value can be retyped (scalars, or generation cut mid-value).
+    """
+    if not text or text.rstrip().endswith("}"):
+        return text
+    if not text.startswith("{"):
+        return text
+    return text + '"}'
+
+
+def _strip_partial_marker(text: str, marker: str) -> str:
+    """Drop a trailing partial ``marker`` from ``text``.
+
+    While streaming, ``</arg_value>`` may arrive as ``</arg_`` + ``value>``.
+    The fragment is not value text, so it must not be emitted - otherwise the
+    client's accumulated JSON ends up containing the tag.
+    """
+    if not marker:
+        return text
+    for size in range(min(len(marker) - 1, len(text)), 0, -1):
+        if text.endswith(marker[:size]):
+            return text[:-size]
+    return text
+
+
+def _xml_partial_value(raw: str) -> str:
+    """Value text for a not-yet-terminated parameter.
+
+    Always treated as a string: the value may still be a prefix of a number or
+    boolean (``tr`` on its way to ``true``), so no type coercion is attempted.
+    The structural newlines that templates put right after the opening tag are
+    dropped, mirroring :func:`clean_xml_value`.
+    """
+    value = raw
+    if value.startswith("\r\n"):
+        value = value[2:]
+    elif value.startswith("\n"):
+        value = value[1:]
+    # Templates put the closing tag on its own line, so a trailing newline is
+    # structural, not value text.  Stripping it keeps the streamed prefix
+    # identical to the eventual parsed value.
+    return value.rstrip("\r\n")
+
+
 def _json_complete(text: str) -> Optional[str]:
     """Return ``text`` when it is a complete JSON value, else ``None``."""
     from .syntax import balanced_json_span
@@ -822,15 +889,28 @@ def _repair_partial_json(text: str) -> str:
 
 
 def _pairs_to_json(pairs: List[Tuple[str, Any]], *, final: bool) -> str:
+    """Serialise collected ``(key, value)`` pairs to (possibly open) JSON.
+
+    While the call is still being generated the result is a valid *prefix* of the
+    final object: values are written with their opening quote but no closing
+    quote, so appending more text to the last value simply extends the stream
+    (``{"city":"Bud`` -> ``{"city":"Budapest"}``).
+    """
+    if not pairs:
+        return "{}" if final else ""
     pieces: List[str] = []
     for index, (key, value) in enumerate(pairs):
         prefix = "{" if index == 0 else ","
-        pieces.append(
-            prefix
-            + json.dumps(key, ensure_ascii=False)
-            + ":"
-            + json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        )
-    if not pieces:
-        return "{}" if final else ""
+        pieces.append(prefix + json.dumps(key, ensure_ascii=False) + ":")
+        last = index == len(pairs) - 1
+        if not last or final:
+            pieces.append(
+                json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            )
+        else:
+            # Not final: the last value is still the growing edge of the stream.
+            # Always render it as an open JSON string so later text simply
+            # extends it.  If the value turns out to be a number/bool, the final
+            # flush rewinds and re-emits it typed (see _flush_tool_args).
+            pieces.append(json.dumps(str(value), ensure_ascii=False)[:-1])
     return "".join(pieces) + ("}" if final else "")
