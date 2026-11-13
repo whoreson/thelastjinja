@@ -4,29 +4,74 @@ from __future__ import annotations
 
 import unittest
 
-from toolcaller.server import ServerConfig, build_sse_stream, stream_requested
+from toolcaller.server import (
+    ServerConfig,
+    build_sse_stream,
+    stream_requested,
+    upstream_stream_enabled,
+    wants_stream_usage,
+)
 from toolcaller.streamer import IncrementalStreamParser
 from toolcaller.profiles import get_profile
 
 
 class TestStreamRequested(unittest.TestCase):
+    """``stream_requested`` reflects what the *client* asked for."""
+
     def test_stream_false_by_default(self):
         self.assertFalse(stream_requested({}, ServerConfig()))
 
     def test_stream_true_is_honoured_by_default(self):
         self.assertTrue(stream_requested({"stream": True}, ServerConfig()))
 
-    def test_no_stream_overrides_client_stream_true(self):
+    def test_client_stream_is_honoured_even_with_no_stream(self):
+        # --no-stream affects the upstream call, not the response format: a
+        # client that asked for SSE must still receive SSE (agentic harnesses
+        # always parse the body as a stream and fail otherwise).
         config = ServerConfig(no_stream=True)
-        self.assertFalse(stream_requested({"stream": True}, config))
-
-    def test_no_stream_keeps_nonstream_nonstream(self):
-        config = ServerConfig(no_stream=True)
-        self.assertFalse(stream_requested({"stream": False}, config))
+        self.assertTrue(stream_requested({"stream": True}, config))
 
     def test_falsy_stream_values(self):
         for value in (None, 0, "", False):
             self.assertFalse(stream_requested({"stream": value}, ServerConfig()))
+
+
+class TestUpstreamStreaming(unittest.TestCase):
+    """``--no-stream`` disables streaming *from the backend*."""
+
+    def test_streaming_by_default(self):
+        self.assertTrue(upstream_stream_enabled(ServerConfig()))
+
+    def test_no_stream_disables_upstream_streaming(self):
+        self.assertFalse(upstream_stream_enabled(ServerConfig(no_stream=True)))
+
+
+class TestStreamUsage(unittest.TestCase):
+    def test_usage_requested(self):
+        self.assertTrue(
+            wants_stream_usage({"stream_options": {"include_usage": True}})
+        )
+
+    def test_usage_not_requested(self):
+        self.assertFalse(wants_stream_usage({}))
+        self.assertFalse(wants_stream_usage({"stream_options": {}}))
+        self.assertFalse(wants_stream_usage({"stream_options": {"include_usage": False}}))
+
+    def test_usage_trailer_chunk(self):
+        stream = build_sse_stream(
+            [], finish_reason="stop", usage={"prompt_tokens": 1,
+                                            "completion_tokens": 2,
+                                            "total_tokens": 3},
+        )
+        trailer = stream[-2]
+        self.assertEqual(trailer["choices"], [])
+        self.assertEqual(trailer["usage"]["total_tokens"], 3)
+        self.assertEqual(stream[-1], "[DONE]")
+
+    def test_no_usage_trailer_by_default(self):
+        stream = build_sse_stream([], finish_reason="stop")
+        self.assertEqual(stream[-1], "[DONE]")
+        self.assertTrue(all(c["choices"] for c in stream[:-1]))
 
 
 class TestInBandSSE(unittest.TestCase):

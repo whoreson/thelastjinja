@@ -142,9 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-stream",
         action="store_true",
         help=(
-            "Disable streaming: fetch/wait for the full response and return one "
-            "JSON body. With --serve, the daemon ignores the client's "
-            "'stream' field and always answers with a single chat.completion."
+            "Do not stream from the backend: fetch the whole completion in one "
+            "/completion call. The client-facing format still follows the "
+            "request's 'stream' field, so streaming clients keep getting SSE "
+            "(just emitted in one pass at the end)."
         ),
     )
     srv.add_argument(

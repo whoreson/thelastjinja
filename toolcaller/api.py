@@ -216,6 +216,43 @@ class ChatResult:
         chunks.append(chunk({}, self.finish_reason))
         return chunks
 
+    def stream_events(self, *, chunk_size: int = 12) -> List[Any]:
+        """Split this completed result into in-band streamer events.
+
+        Produces the same ``(kind, payload)`` sequence the incremental
+        streamer emits while tokens arrive, so a buffered (non-upstream-streamed)
+        completion can be rendered as an identical SSE stream.
+
+        Reasoning and content are re-chunked into small pieces so the resulting
+        deltas look like a real stream; tool arguments are chunked likewise.
+        """
+        events: List[Any] = []
+        reasoning = self.parsed.reasoning_content or ""
+        for piece in _chunk_text(reasoning, chunk_size):
+            events.append(("reasoning", piece))
+
+        content = self.message.get("content") or ""
+        if isinstance(content, str):
+            for piece in _chunk_text(content, chunk_size):
+                events.append(("content", piece))
+
+        for index, call in enumerate(self.parsed.tool_calls):
+            events.append(("tool_start", (index, call.id, call.name)))
+            arguments = json.dumps(
+                call.arguments, ensure_ascii=False, separators=(",", ":")
+            )
+            for piece in _chunk_text(arguments, chunk_size):
+                events.append(("tool_args", (index, piece)))
+        return events
+
+
+def _chunk_text(text: str, size: int) -> List[str]:
+    if not text:
+        return []
+    if size <= 0:
+        return [text]
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
 
 class ChatPipeline:
     """Everything wired together, with per-request overrides."""

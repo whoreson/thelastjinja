@@ -229,16 +229,26 @@ generation prompt), `completion` (raw server data), `warnings` and `to_response(
 --strip-generation-thinking                 make the model emit <think> itself
 --response-format {openai,simple,raw,both}  output shape
 --stream                                    stream from the server
---no-stream                                 disable streaming (one full response)
+--no-stream                                 fetch the whole completion in one /completion call
 --serve                                     run the OpenAI-compatible daemon
 --inspect-template / --check-server / --list-profiles / --dump-profile NAME
 ```
 
-`--no-stream` applies to both modes. On the CLI it fetches the whole
+`--no-stream` controls whether the proxy **streams from the backend**, not the
+format of the client-facing response. On the CLI it fetches the whole
 completion in a single `/completion` call (upstream receives `"stream": false`).
-With `--serve` the daemon ignores `"stream": true` from clients and always
-answers with one `chat.completion` JSON body (`Content-Type: application/json`)
-instead of an SSE stream.
+With `--serve` the same applies per request, but the response format still
+follows the client's `"stream"` field:
+
+| Client `stream` | `--no-stream` | Upstream call | Response body |
+|---|---|---|---|
+| `false` | either | blocking or streamed | `chat.completion` JSON |
+| `true` | off | streamed `/completion` | SSE as tokens arrive |
+| `true` | on | one blocking `/completion` | SSE, emitted in one pass at the end |
+
+A client that asked for SSE always gets SSE (OpenAI SDK clients - including
+agentic harnesses such as Pi - iterate the body as a stream and fail with
+"Stream ended without finish_reason" if handed a plain JSON object).
 
 ### Streaming format (in-band tool calls)
 

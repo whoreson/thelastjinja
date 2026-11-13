@@ -305,6 +305,29 @@ class TestPipeline(unittest.TestCase):
         tool_chunks = [c for c in chunks if "tool_calls" in c["choices"][0]["delta"]]
         self.assertEqual(len(tool_chunks), 1)
 
+    def test_stream_events_from_completed_result(self):
+        """A buffered (non-streamed) result can still be rendered as SSE."""
+        from toolcaller.server import build_sse_stream
+
+        pipe = make_pipeline(TOOL_CALL)
+        result = pipe.complete({"messages": [{"role": "user", "content": "hi"}]})
+        stream = build_sse_stream(
+            result.stream_events(), finish_reason=result.finish_reason,
+            request_id="chatcmpl-t", created=1,
+        )
+        self.assertEqual(stream[-1], "[DONE]")
+        finish = stream[-2]["choices"][0]
+        self.assertEqual(finish["finish_reason"], "tool_calls")
+
+        deltas = [c["choices"][0]["delta"] for c in stream[:-1]]
+        self.assertFalse(any("<tool_call>" in (d.get("content") or "") for d in deltas))
+        tool_deltas = [d["tool_calls"][0] for d in deltas if "tool_calls" in d]
+        self.assertEqual(tool_deltas[0]["function"]["name"], "get_weather")
+        args = "".join(
+            t.get("function", {}).get("arguments", "") for t in tool_deltas
+        )
+        self.assertEqual(json.loads(args), {"city": "Budapest"})
+
     def test_tool_choice_none_drops_calls(self):
         pipe = make_pipeline(TOOL_CALL)
         result = pipe.complete(

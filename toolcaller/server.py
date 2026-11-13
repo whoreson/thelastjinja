@@ -101,16 +101,24 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 # ---------------------------------------------------------------------------
 
 def stream_requested(request: Dict[str, Any], config: ServerConfig) -> bool:
-    """Decide whether to answer with SSE.
+    """Does the *client* expect an SSE response body?
 
-    The client asks for streaming via ``"stream": true``, but the daemon can
-    force non-streaming with ``--no-stream`` (``config.no_stream``).  In that
-    case every request is answered with a single ``chat.completion`` JSON body
-    regardless of what the client asked for.
+    This is decided purely by the request's ``"stream"`` field - OpenAI clients
+    (including agentic harnesses that always use the SDK's streaming API) parse
+    the body as a stream whenever they asked for one, so we must never answer
+    them with a bare JSON body.
     """
-    if config.no_stream:
-        return False
     return bool(request.get("stream", False))
+
+
+def upstream_stream_enabled(config: ServerConfig) -> bool:
+    """May the daemon stream from the upstream ``/completion`` endpoint?
+
+    ``--no-stream`` forces a single blocking completion per request.  The
+    response to the client is still streamed (see :func:`stream_requested`);
+    it is just emitted in one piece once the completion is complete.
+    """
+    return not config.no_stream
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +159,16 @@ def build_sse_stream(
     request_id: str = "chatcmpl-test",
     created: Optional[int] = None,
     model: str = "unknown",
+    usage: Optional[Dict[str, Any]] = None,
 ) -> List[Any]:
     """Turn streamer events into the exact sequence written as SSE.
 
     Returns the list of JSON objects plus the final ``"[DONE]"`` string, in
     order - the same thing ``_drain_sse_queue`` writes to the socket.  Kept
     free of HTTP details so it can be unit-tested.
+
+    When ``usage`` is given it is appended as the OpenAI ``stream_options:
+    {include_usage: true}`` trailer chunk (empty ``choices``).
     """
     created = created if created is not None else int(time.time())
 
@@ -183,8 +195,23 @@ def build_sse_stream(
         if delta is not None:
             out.append(chunk(delta))
     out.append(chunk({}, finish_reason))
+    if usage is not None:
+        out.append({
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [],
+            "usage": usage,
+        })
     out.append("[DONE]")
     return out
+
+
+def wants_stream_usage(request: Dict[str, Any]) -> bool:
+    """Did the client ask for a trailing usage chunk?"""
+    options = request.get("stream_options")
+    return isinstance(options, dict) and bool(options.get("include_usage"))
 
 
 # ---------------------------------------------------------------------------
@@ -315,15 +342,29 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def worker():
-            """Consume the backend stream and enqueue in-band events."""
+            """Consume the backend completion and enqueue in-band events."""
             try:
-                result = pipeline.complete(
-                    request,
-                    stream=True,
-                    strict_parse=False,
-                    cancel=cancel,
-                    on_event=lambda kind, payload: q.put((kind, payload)),
-                )
+                if upstream_stream_enabled(self.server.config):
+                    result = pipeline.complete(
+                        request,
+                        stream=True,
+                        strict_parse=False,
+                        cancel=cancel,
+                        on_event=lambda kind, payload: q.put((kind, payload)),
+                    )
+                else:
+                    # --no-stream: one blocking /completion call, then replay
+                    # the finished result as a normal SSE stream so that
+                    # streaming clients (which always parse SSE) still get a
+                    # well-formed response with a finish_reason.
+                    result = pipeline.complete(
+                        request,
+                        stream=False,
+                        strict_parse=False,
+                        cancel=cancel,
+                    )
+                    for event in result.stream_events():
+                        q.put(event)
                 q.put(result)  # sentinel: the ChatResult
             except Exception as exc:
                 q.put(exc)  # sentinel: the error
@@ -335,7 +376,10 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         # Drain the queue and write SSE to the client.
         try:
-            self._drain_sse_queue(q, done, cancel, request_id, created)
+            self._drain_sse_queue(
+                q, done, cancel, request_id, created,
+                include_usage=wants_stream_usage(request),
+            )
         except BrokenPipeError:
             cancel.set()
         except ConnectionResetError:
@@ -353,6 +397,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         cancel: threading.Event,
         request_id: str,
         created: int,
+        include_usage: bool = False,
     ):
         """Drain in-band events from the worker and write SSE to the client.
 
@@ -420,6 +465,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                     sse_write("[DONE]")
                     return
                 chunk({}, result.finish_reason)
+                if include_usage:
+                    sse_write({
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [],
+                        "usage": result.usage(),
+                    })
                 sse_write("[DONE]")
                 return
 
