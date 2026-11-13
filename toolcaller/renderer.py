@@ -144,6 +144,108 @@ def requires_non_null_content(messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return out
 
 
+#: ``reasoning_effort`` values that mean "do not think".
+_THINKING_OFF_EFFORTS = {"none", "off", "disabled", "minimal", ""}
+#: ``reasoning_effort`` values that mean "think", with the matching template hint.
+_THINKING_EFFORT_HINTS = {"low": "low", "medium": "high", "high": "high"}
+
+
+def resolve_thinking(
+    request: Optional[Dict[str, Any]],
+) -> tuple:
+    """Decide whether the model should think, and at what effort.
+
+    Clients signal this in several incompatible ways, so all of them are
+    accepted (first match wins):
+
+    ==========================================  ==================
+    signal                                      meaning
+    ==========================================  ==================
+    ``enable_thinking: false``                  off
+    ``chat_template_kwargs.enable_thinking``    off/on
+    ``reasoning_effort: "none"``                off
+    ``reasoning_effort: "low"``                 on, effort low
+    ``reasoning_effort: "medium"``/``"high"``   on, effort high
+    ``thinking: {type: "disabled"}``            off
+    ``thinking: {type: "enabled"}``             on
+    ``reasoning: {enabled: false}``             off
+    ``reasoning_enabled: false``                off
+    ``reasoning.max_tokens: 0``                 off
+    *(nothing)*                                 on (server default)
+    ==========================================  ==================
+
+    Returns ``(enabled, effort)`` where ``effort`` is ``None`` for the
+    template's default.
+    """
+    if not request:
+        return True, None
+
+    def as_bool(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("false", "0", "no", "off", "none", "disabled"):
+                return False
+            if lowered in ("true", "1", "yes", "on", "enabled"):
+                return True
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return None
+
+    # 1. Explicit template variables win (enable_thinking / chat_template_kwargs).
+    for container in (request, request.get("chat_template_kwargs")):
+        if isinstance(container, dict) and "enable_thinking" in container:
+            flag = as_bool(container["enable_thinking"])
+            if flag is not None:
+                return flag, None
+
+    # 2. reasoning_effort: absence means "off" for some clients, but the
+    #    server default (on) is kept - only explicit values are acted upon.
+    if "reasoning_effort" in request:
+        raw = request.get("reasoning_effort")
+        if raw is None:
+            return False, None
+        effort = str(raw).strip().lower()
+        if effort in _THINKING_OFF_EFFORTS:
+            return False, None
+        return True, _THINKING_EFFORT_HINTS.get(effort, None)
+
+    # 3. Nested thinking / reasoning objects.
+    thinking = request.get("thinking")
+    if isinstance(thinking, dict):
+        kind = thinking.get("type")
+        if isinstance(kind, str):
+            if kind.strip().lower() in ("disabled", "none", "off"):
+                return False, None
+            if kind.strip().lower() in ("enabled", "on"):
+                return True, None
+        budget = thinking.get("budget_tokens")
+        if isinstance(budget, (int, float)) and budget <= 0:
+            return False, None
+    if isinstance(thinking, bool):
+        return thinking, None
+
+    reasoning = request.get("reasoning")
+    if isinstance(reasoning, dict):
+        if "enabled" in reasoning:
+            flag = as_bool(reasoning["enabled"])
+            if flag is not None:
+                return flag, None
+        max_tokens = reasoning.get("max_tokens")
+        if isinstance(max_tokens, (int, float)) and max_tokens <= 0:
+            return False, None
+    if isinstance(reasoning, bool):
+        return reasoning, None
+
+    if "reasoning_enabled" in request:
+        flag = as_bool(request["reasoning_enabled"])
+        if flag is not None:
+            return flag, None
+
+    return True, None
+
+
 def _extra_context(now: Optional[_datetime.datetime] = None) -> Dict[str, Any]:
     """llama.cpp's ``common_chat_extra_context``."""
     now = now or _datetime.datetime.now()
@@ -308,16 +410,12 @@ class PromptRenderer:
         if tools:
             context["tools"] = _tools_to_json(tools)
         if self.caps.supports_enable_thinking:
-            # Default: thinking on.  Can be overridden by request-level
-            # reasoning_effort ("none" => off, "low"/"high" => on) or by
-            # template_kwargs / default_template_kwargs.
-            context["enable_thinking"] = True
-            if request is not None:
-                reasoning_effort = request.get("reasoning_effort")
-                if reasoning_effort == "none":
-                    context["enable_thinking"] = False
-                elif reasoning_effort in ("low", "high"):
-                    context["reasoning_effort"] = reasoning_effort
+            # Thinking is controlled by several client conventions; see
+            # ``resolve_thinking``.  Default is on unless the client says off.
+            enabled, effort = resolve_thinking(request)
+            context["enable_thinking"] = enabled
+            if enabled and effort:
+                context["reasoning_effort"] = effort
         context.update(self.extra_context if now is None else _extra_context(now))
         kwargs = dict(self.default_template_kwargs)
         if template_kwargs:

@@ -276,6 +276,35 @@ concatenate to a JSON object. Tool-call markup (`<tool_call>`, `<arg_key>`, …)
 and reasoning markers never leak into `content`. `toolcaller/streamer.py` does
 the splitting while tokens arrive, so non-streaming and streaming agree.
 
+### Turning thinking on and off
+
+The request may disable chain-of-thought with any of the conventions clients
+actually send; the first one present wins:
+
+| Request field | Meaning |
+|---|---|
+| `enable_thinking: false` | off |
+| `chat_template_kwargs: {"enable_thinking": false}` | off |
+| `reasoning_effort: "none"` (also `"off"`, `"minimal"`, `null`) | off |
+| `reasoning_effort: "low"` | on, low effort |
+| `reasoning_effort: "medium"` / `"high"` | on, high effort |
+| `thinking: {"type": "disabled"}` | off |
+| `reasoning: {"enabled": false}` / `reasoning_enabled: false` | off |
+| *(absent)* | on (server default) |
+
+**Pi caveat.** Pi's default `thinkingFormat` for a plain OpenAI-compatible URL
+is `openai`, and when thinking is switched off it sends **no thinking field at
+all** - which is indistinguishable from "unspecified", so the server default
+(on) applies. To make "off" explicit, map it in the model config:
+
+```json
+{ "thinkingLevelMap": { "off": "none" } }
+```
+
+Pi then sends `reasoning_effort: "none"`, which this proxy disables thinking
+for. (With `thinkingFormat: "qwen"` Pi sends `enable_thinking: false`, also
+handled.)
+
 ### Known limitations
 
 * **Thinking is pre-filled by many templates.** Qwen's generation prompt ends

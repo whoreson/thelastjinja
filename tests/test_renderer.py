@@ -409,3 +409,89 @@ class TestReasoningEffort(unittest.TestCase):
             now=None,
         )
         self.assertFalse(ctx["enable_thinking"])
+
+
+class TestResolveThinking(unittest.TestCase):
+    """Every client convention that disables thinking must be honoured.
+
+    Pi sends nothing at all for the plain OpenAI-compatible format, and sends
+    ``reasoning_effort`` / ``enable_thinking`` / ``chat_template_kwargs`` for
+    the qwen formats - so all of these have to map to the template variable.
+    """
+
+    def test_absent_means_default_on(self):
+        from toolcaller.renderer import resolve_thinking
+
+        self.assertEqual(resolve_thinking({}), (True, None))
+        self.assertEqual(resolve_thinking(None), (True, None))
+        self.assertEqual(resolve_thinking({"messages": []}), (True, None))
+
+    def test_reasoning_effort_values(self):
+        from toolcaller.renderer import resolve_thinking
+
+        self.assertEqual(resolve_thinking({"reasoning_effort": "none"}), (False, None))
+        self.assertEqual(resolve_thinking({"reasoning_effort": "off"}), (False, None))
+        self.assertEqual(resolve_thinking({"reasoning_effort": "minimal"}), (False, None))
+        self.assertEqual(resolve_thinking({"reasoning_effort": None}), (False, None))
+        self.assertEqual(resolve_thinking({"reasoning_effort": "low"}), (True, "low"))
+        self.assertEqual(resolve_thinking({"reasoning_effort": "medium"}), (True, "high"))
+        self.assertEqual(resolve_thinking({"reasoning_effort": "high"}), (True, "high"))
+
+    def test_enable_thinking_flag(self):
+        from toolcaller.renderer import resolve_thinking
+
+        self.assertEqual(resolve_thinking({"enable_thinking": False}), (False, None))
+        self.assertEqual(resolve_thinking({"enable_thinking": True}), (True, None))
+        self.assertEqual(
+            resolve_thinking({"enable_thinking": "false"}), (False, None)
+        )
+
+    def test_chat_template_kwargs(self):
+        from toolcaller.renderer import resolve_thinking
+
+        self.assertEqual(
+            resolve_thinking({"chat_template_kwargs": {"enable_thinking": False}}),
+            (False, None),
+        )
+
+    def test_nested_thinking_objects(self):
+        from toolcaller.renderer import resolve_thinking
+
+        self.assertEqual(
+            resolve_thinking({"thinking": {"type": "disabled"}}), (False, None)
+        )
+        self.assertEqual(
+            resolve_thinking({"thinking": {"type": "enabled"}}), (True, None)
+        )
+        self.assertEqual(
+            resolve_thinking({"reasoning": {"enabled": False}}), (False, None)
+        )
+        self.assertEqual(
+            resolve_thinking({"reasoning": {"max_tokens": 0}}), (False, None)
+        )
+        self.assertEqual(resolve_thinking({"reasoning_enabled": False}), (False, None))
+
+    def test_off_signal_changes_rendered_prompt(self):
+        from toolcaller.renderer import PromptRenderer
+        from toolcaller.environment import load_template_file
+
+        env = load_template_file(SPARK_TEMPLATE)
+        r = PromptRenderer(
+            env=env,
+            bos_token="<｜start▁of▁sentence｜>",
+            eos_token="<｜end▁of▁sentence｜>",
+            strict=True,
+        )
+        on = r.render(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            template_kwargs=None,
+        )
+        off = r.render(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "none",
+            },
+            template_kwargs=None,
+        )
+        self.assertTrue(on.prompt.rstrip().endswith("<think>"))
+        self.assertFalse(off.prompt.rstrip().endswith("<think>"))
