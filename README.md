@@ -230,6 +230,7 @@ generation prompt), `completion` (raw server data), `warnings` and `to_response(
 --response-format {openai,simple,raw,both}  output shape
 --stream                                    stream from the server
 --no-stream                                 fetch the whole completion in one /completion call
+--dump                                      print the received JSON request to stderr
 --serve                                     run the OpenAI-compatible daemon
 --inspect-template / --check-server / --list-profiles / --dump-profile NAME
 ```
@@ -249,6 +250,20 @@ follows the client's `"stream"` field:
 A client that asked for SSE always gets SSE (OpenAI SDK clients - including
 agentic harnesses such as Pi - iterate the body as a stream and fail with
 "Stream ended without finish_reason" if handed a plain JSON object).
+
+### Inspecting the request
+
+`--dump` prints the JSON request as received, verbatim, to **stderr**, before
+any processing.  stderr keeps stdout machine-readable, so piping the result
+still works:
+
+```bash
+python3 -m toolcaller -t qwen.jinja --chat examples/request_tool_call.json \
+    --dump --render-only | jq .profile
+```
+
+It applies to the daemon too, where each `POST /v1/chat/completions` body is
+written to the server's stderr (never into the SSE/JSON response).
 
 ### Streaming format (in-band tool calls)
 

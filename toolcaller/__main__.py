@@ -256,6 +256,14 @@ def build_parser() -> argparse.ArgumentParser:
     out.add_argument("--indent", type=int, default=2, help="JSON indent (default: %(default)s)")
     out.add_argument("--quiet", "-q", action="store_true", help="Suppress stderr diagnostics")
     out.add_argument("--debug", action="store_true", help="Verbose diagnostics on stderr")
+    out.add_argument(
+        "--dump",
+        action="store_true",
+        help=(
+            "Print the received JSON request to stderr, as-is, before processing "
+            "(stderr keeps stdout clean)"
+        ),
+    )
 
     # --- utilities -----------------------------------------------------
     util = parser.add_argument_group("utilities")
@@ -302,6 +310,20 @@ def parse_template_kwargs(pairs: List[str]) -> Dict[str, Any]:
     return kwargs
 
 
+def dump_json(obj: Any, args: argparse.Namespace) -> None:
+    """``--dump``: print a received JSON payload to stderr.
+
+    stderr is used deliberately so the machine-readable result on stdout stays
+    parseable (``... | jq`` keeps working).
+    """
+    if not getattr(args, "dump", False):
+        return
+    print("----- request -----", file=sys.stderr)
+    print(dumps(obj, args), file=sys.stderr)
+    print("----- end request -----", file=sys.stderr)
+    sys.stderr.flush()
+
+
 def load_request(args: argparse.Namespace) -> Dict[str, Any]:
     request: Optional[Dict[str, Any]] = None
     if args.chat and args.chat != "-":
@@ -323,6 +345,9 @@ def load_request(args: argparse.Namespace) -> Dict[str, Any]:
 
     if request is None:
         raise ConfigError("no input: pass --chat FILE, --messages JSON or --stdin")
+
+    # --dump: show what was received, before any CLI overrides are applied.
+    dump_json(request, args)
 
     if args.tools:
         try:
@@ -633,6 +658,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         strip_generation_thinking=args.strip_generation_thinking,
         cors_origins=cors_origins,
         no_stream=args.no_stream,
+        dump=args.dump,
         debug=args.debug,
     )
 

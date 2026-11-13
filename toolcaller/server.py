@@ -74,9 +74,10 @@ class ServerConfig:
     strip_generation_thinking: bool = False
     max_request_body: int = 16 * 1024 * 1024  # 16 MB
     cors_origins: Optional[List[str]] = None
-    # Force non-streaming: ignore the client's "stream" field and always
-    # return a single JSON chat.completion response.
+    # Force non-streaming upstream (single blocking /completion call).
     no_stream: bool = False
+    #: Print every received request body to stderr, as-is.
+    dump: bool = False
     debug: bool = False
 
 
@@ -286,12 +287,36 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": f"invalid JSON: {exc}"})
             return
 
+        if self.server.config.dump:
+            self._dump_request(body)
+
         stream = stream_requested(request, self.server.config)
 
         if stream:
             self._stream_response(request, pipeline)
         else:
             self._nonstream_response(request, pipeline)
+
+    def _dump_request(self, body: bytes) -> None:
+        """``--dump``: write the received request body to stderr, untouched.
+
+        Printed verbatim (not re-serialised) so it reflects exactly what the
+        client sent.  stderr keeps the SSE/JSON response stream on stdout-free
+        ground and out of the HTTP body.
+        """
+        try:
+            text = body.decode("utf-8", "replace")
+        except Exception:  # pragma: no cover - defensive
+            text = repr(body)
+        sys.stderr.write("----- request -----\n")
+        sys.stderr.write(text)
+        if not text.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.write("----- end request -----\n")
+        try:
+            sys.stderr.flush()
+        except Exception:  # pragma: no cover - stderr gone
+            pass
 
     def _nonstream_response(self, request: Dict, pipeline: ChatPipeline):
         cancel = threading.Event()

@@ -46,6 +46,40 @@ class TestUpstreamStreaming(unittest.TestCase):
         self.assertFalse(upstream_stream_enabled(ServerConfig(no_stream=True)))
 
 
+class TestDumpRequest(unittest.TestCase):
+    """``--dump`` prints the received request body verbatim to stderr."""
+
+    def _dump(self, body: bytes, *, dump: bool = True) -> str:
+        from toolcaller.server import ChatHandler
+        import io
+        import contextlib
+
+        config = ServerConfig(dump=dump)
+
+        # Call the unbound helper with a throwaway instance (it only uses
+        # ``self.server.config.dump`` indirectly; the method itself does not).
+        handler = ChatHandler.__new__(ChatHandler)
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            handler._dump_request(body)
+        return buffer.getvalue()
+
+    def test_body_is_printed_verbatim(self):
+        body = b'{"messages":[{"role":"user","content":"hi"}],"stream":true}'
+        out = self._dump(body)
+        self.assertIn("----- request -----", out)
+        self.assertIn("----- end request -----", out)
+        # Verbatim: same bytes, not re-serialised with indentation.
+        self.assertIn(body.decode(), out)
+
+    def test_trailing_newline_added_once(self):
+        out = self._dump(b'{"a":1}')
+        self.assertIn('{"a":1}\n', out)
+
+    def test_dump_flag_defaults_off(self):
+        self.assertFalse(ServerConfig().dump)
+
+
 class TestStreamUsage(unittest.TestCase):
     def test_usage_requested(self):
         self.assertTrue(
