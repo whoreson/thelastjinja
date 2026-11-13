@@ -114,6 +114,80 @@ def stream_requested(request: Dict[str, Any], config: ServerConfig) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SSE chunk construction
+# ---------------------------------------------------------------------------
+
+def event_to_delta(kind: str, payload: Any) -> Optional[Dict[str, Any]]:
+    """Map one in-band streamer event to an OpenAI ``delta`` object.
+
+    ``None`` means the event produced no observable delta (empty fragment).
+    """
+    if kind == "reasoning":
+        return {"reasoning_content": payload} if payload else None
+    if kind == "content":
+        return {"content": payload} if payload else None
+    if kind == "tool_start":
+        index, call_id, name = payload
+        return {
+            "tool_calls": [{
+                "index": index,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": ""},
+            }]
+        }
+    if kind == "tool_args":
+        index, fragment = payload
+        if not fragment:
+            return None
+        return {"tool_calls": [{"index": index, "function": {"arguments": fragment}}]}
+    return None
+
+
+def build_sse_stream(
+    events: List[Any],
+    *,
+    finish_reason: str = "stop",
+    request_id: str = "chatcmpl-test",
+    created: Optional[int] = None,
+    model: str = "unknown",
+) -> List[Any]:
+    """Turn streamer events into the exact sequence written as SSE.
+
+    Returns the list of JSON objects plus the final ``"[DONE]"`` string, in
+    order - the same thing ``_drain_sse_queue`` writes to the socket.  Kept
+    free of HTTP details so it can be unit-tested.
+    """
+    created = created if created is not None else int(time.time())
+
+    def chunk(delta: Dict[str, Any], finish: Optional[str] = None,
+              model_name: str = model) -> Dict[str, Any]:
+        return {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "logprobs": None,
+                "finish_reason": finish,
+            }],
+        }
+
+    out: List[Any] = [chunk({"role": "assistant"})]
+    for item in events:
+        if not (isinstance(item, tuple) and len(item) == 2):
+            continue  # not an in-band event
+        delta = event_to_delta(*item)
+        if delta is not None:
+            out.append(chunk(delta))
+    out.append(chunk({}, finish_reason))
+    out.append("[DONE]")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
 
@@ -241,14 +315,14 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def worker():
-            """Consume the backend stream and enqueue parsed chunks."""
+            """Consume the backend stream and enqueue in-band events."""
             try:
                 result = pipeline.complete(
                     request,
                     stream=True,
                     strict_parse=False,
                     cancel=cancel,
-                    on_chunk=lambda chunk: q.put(chunk),
+                    on_event=lambda kind, payload: q.put((kind, payload)),
                 )
                 q.put(result)  # sentinel: the ChatResult
             except Exception as exc:
@@ -280,28 +354,47 @@ class ChatHandler(BaseHTTPRequestHandler):
         request_id: str,
         created: int,
     ):
-        """Drain items from the worker's queue and write SSE to the client.
+        """Drain in-band events from the worker and write SSE to the client.
 
-        Raw text chunks (str) are forwarded immediately as content deltas
-        so the client sees tokens as they arrive.  When the worker finishes,
-        the ChatResult sentinel is sent; if it contains tool calls they are
-        appended as additional chunks.
+        The worker parses the model output *incrementally* and emits events:
+
+        * ``reasoning``  -> ``delta.reasoning_content``
+        * ``content``    -> ``delta.content``
+        * ``tool_start`` -> ``delta.tool_calls[].{index,id,type,function.name}``
+        * ``tool_args``  -> ``delta.tool_calls[].function.arguments`` (fragment)
+
+        This is the in-band format expected by agentic clients (Pi): reasoning,
+        text and tool calls all travel inside the same delta stream, and the
+        tool-call markup itself never leaks into ``content``.
         """
         model_name: Optional[str] = "unknown"
-        content_sent: List[str] = []  # track what we already streamed
 
         def sse_write(data: Any) -> None:
             line = f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
             self.wfile.write(line.encode("utf-8"))
             self.wfile.flush()
 
-        # Initial role chunk
+        def chunk(delta: Dict[str, Any], finish_reason: Optional[str] = None) -> None:
+            sse_write({
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": delta,
+                    "logprobs": None,
+                    "finish_reason": finish_reason,
+                }],
+            })
+
+        # Initial role chunk.
         sse_write({
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": "",
-            "choices": [{"index": 0, "delta": {"role": "assistant"}}],
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
         })
 
         while True:
@@ -310,8 +403,6 @@ class ChatHandler(BaseHTTPRequestHandler):
             try:
                 item = q.get(timeout=0.5)
             except queue.Empty:
-                if done.is_set():
-                    continue
                 continue
 
             # Sentinel: Exception from the worker.
@@ -328,48 +419,16 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if result.completion.cancelled:
                     sse_write("[DONE]")
                     return
-                # Send any tool calls that weren't in the raw text stream.
-                for call in result.parsed.tool_calls:
-                    sse_write({
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_name,
-                        "choices": [{"index": 0, "delta": {"tool_calls": [{
-                            "index": 0,
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": json.dumps(
-                                    call.arguments,
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                ),
-                            },
-                        }]}}],
-                    })
-                # Finish.
-                sse_write({
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": result.finish_reason}],
-                })
+                chunk({}, result.finish_reason)
                 sse_write("[DONE]")
                 return
 
-            # Regular text chunk from on_chunk callback.
-            if isinstance(item, str):
-                content_sent.append(item)
-                sse_write({
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{"index": 0, "delta": {"content": item}}],
-                })
+            # In-band event from the incremental streamer.
+            if isinstance(item, tuple) and len(item) == 2:
+                delta = event_to_delta(*item)
+                if delta is not None:
+                    chunk(delta)
+                continue
 
     def _upstream_ok(self) -> str:
         try:

@@ -240,6 +240,24 @@ With `--serve` the daemon ignores `"stream": true` from clients and always
 answers with one `chat.completion` JSON body (`Content-Type: application/json`)
 instead of an SSE stream.
 
+### Streaming format (in-band tool calls)
+
+With SSE enabled the daemon emits the deltas agentic clients expect, in order:
+
+| Delta | Meaning |
+|---|---|
+| `{"role":"assistant"}` | first chunk |
+| `{"reasoning_content":"..."}` | chain of thought |
+| `{"content":"..."}` | answer text |
+| `{"tool_calls":[{"index":0,"id":"call_…","type":"function","function":{"name":"…","arguments":""}}]}` | tool call begins |
+| `{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":\\"Bud…"}}]}` | argument fragments |
+| `{"delta":{},"finish_reason":"tool_calls"}` then `[DONE]` | end of stream |
+
+Argument fragments are streamed incrementally (never replayed at the end) and
+concatenate to a JSON object. Tool-call markup (`<tool_call>`, `<arg_key>`, …)
+and reasoning markers never leak into `content`. `toolcaller/streamer.py` does
+the splitting while tokens arrive, so non-streaming and streaming agree.
+
 ### Known limitations
 
 * **Thinking is pre-filled by many templates.** Qwen's generation prompt ends
@@ -279,11 +297,12 @@ toolcaller/
   syntax.py       SyntaxProfile + argument decoders
   profiles.py     built-in profiles + aliases + profile files
   parser.py       generic profile-driven tool-call parser
+  streamer.py     incremental reasoning/content/tool-call stream splitter
   api.py          ChatPipeline / ChatResult
   __main__.py     CLI
 
 examples/         ready-to-run chat requests
-tests/            201 unit tests (`python3 -m unittest discover -s tests`)
+tests/            243 unit tests (`python3 -m unittest discover -s tests`)
 ```
 
 ## Tests

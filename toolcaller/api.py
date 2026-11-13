@@ -38,6 +38,7 @@ from .parser import (
 )
 from .profiles import SyntaxProfile, get_profile
 from .renderer import PromptRenderer, RenderResult
+from .streamer import IncrementalStreamParser
 
 
 #: Sampling parameters we forward verbatim to ``/completion``.
@@ -123,6 +124,10 @@ class ChatResult:
     warnings: List[str] = field(default_factory=list)
     elapsed: float = 0.0
     model: str = ""
+    #: True when the generation prompt left the model *inside* a reasoning
+    #: block (e.g. Qwen's trailing ``<think>``), so the output starts as
+    #: reasoning and only ``</think>`` ends it.
+    reasoning_prefilled: bool = False
 
     # -- OpenAI-shaped output ---------------------------------------------
     def to_response(self, *, request_id: Optional[str] = None,
@@ -341,6 +346,7 @@ class ChatPipeline:
         reasoning_format: Optional[str] = None,
         hint_mode: Optional[str] = None,
         on_chunk: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[..., None]] = None,
         n_predict: Optional[int] = None,
         sampling: Optional[Dict[str, Any]] = None,
         stream: bool = False,
@@ -399,6 +405,23 @@ class ChatPipeline:
         # When the generation prompt's reasoning marker was stripped, the output
         # starts inside the reasoning block; ``split_reasoning`` handles that by
         # accepting a leading ``</think>`` without a preceding ``<think>``.
+        reasoning_prefilled = self._reasoning_prefilled(render, active_profile)
+
+        # In-band streaming: as raw text arrives, split it into reasoning /
+        # content / tool-call events so the client sees a proper OpenAI SSE
+        # stream (instead of raw markup dumped into ``content``).
+        chunk_callback = on_chunk
+        streamer: Optional[IncrementalStreamParser] = None
+        if stream and on_event is not None:
+            streamer = IncrementalStreamParser(
+                active_profile,
+                reasoning_format=effective_reasoning,
+                reasoning_prefilled=reasoning_prefilled,
+            )
+
+            def chunk_callback(piece: str) -> None:  # type: ignore[misc]
+                for event in streamer.feed(piece):
+                    on_event(*event)
 
         completion = self._run_completion(
             prompt,
@@ -407,9 +430,12 @@ class ChatPipeline:
             n_predict=n_predict,
             sampling=sampling,
             stream=stream,
-            on_chunk=on_chunk,
+            on_chunk=chunk_callback,
             cancel=cancel,
         )
+        if streamer is not None and on_event is not None:
+            for event in streamer.finalize():
+                on_event(*event)
         warnings.extend(completion.warnings)
 
         text = completion.text
@@ -454,9 +480,36 @@ class ChatPipeline:
             warnings=warnings,
             elapsed=time.time() - started,
             model=completion.model,
+            reasoning_prefilled=reasoning_prefilled,
         )
 
     # -- internals ---------------------------------------------------------
+    @staticmethod
+    def _reasoning_prefilled(render: RenderResult, profile: SyntaxProfile) -> bool:
+        """Does the generation prompt leave the model inside a reasoning block?
+
+        True when the (possibly stripped) generation prompt ends with the
+        reasoning *start* marker and not with its *end* marker.  In that case
+        the model output begins as reasoning and ``</think>`` closes it.
+        """
+        start = profile.reasoning_start
+        end = profile.reasoning_end
+        if not start or not end:
+            return False
+        # Prefer the generation prompt; some templates cannot produce a stable
+        # suffix (time-dependent output), in which case fall back to the actual
+        # prompt tail, which is what the model sees.
+        candidates = [render.generation_prompt or "", render.prompt or ""]
+        for prompt in candidates:
+            if not prompt:
+                continue
+            stripped = prompt.rstrip()
+            if end and stripped.endswith(end):
+                return False
+            if stripped.endswith(start):
+                return True
+        return False
+
     def _render_with_hints(
         self,
         request: Dict[str, Any],
