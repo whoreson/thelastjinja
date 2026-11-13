@@ -18,6 +18,7 @@ from toolcaller.renderer import (
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QWEN_TEMPLATE = os.path.join(HERE, "qwen.jinja")
 SPARK_TEMPLATE = os.path.join(HERE, "spark.jinja")
+GLM_TEMPLATE = os.path.join(HERE, "glm.jinja")
 
 CHATML = (
     "{%- for message in messages -%}"
@@ -495,3 +496,54 @@ class TestResolveThinking(unittest.TestCase):
         )
         self.assertTrue(on.prompt.rstrip().endswith("<think>"))
         self.assertFalse(off.prompt.rstrip().endswith("<think>"))
+
+
+class TestReasoningEffortWithoutEnableThinking(unittest.TestCase):
+    """GLM has no enable_thinking switch but honours reasoning_effort levels.
+
+    The effort must be forwarded even though the template cannot disable
+    thinking, otherwise every request falls back to the template default.
+    """
+
+    def _renderer(self):
+        from toolcaller.renderer import PromptRenderer
+        from toolcaller.environment import load_template_file
+
+        env = load_template_file(GLM_TEMPLATE)
+        return PromptRenderer(
+            env=env,
+            bos_token="[gMASK]",
+            eos_token="<|endoftext|>",
+            strict=True,
+        )
+
+    def _effort_line(self, request):
+        render = self._renderer().render(request, template_kwargs=None)
+        import re
+
+        match = re.search(r"Reasoning Effort: (\w+)", render.prompt)
+        return match.group(1) if match else None
+
+    def test_low_is_forwarded(self):
+        self.assertEqual(
+            self._effort_line(
+                {"messages": [{"role": "user", "content": "hi"}],
+                 "reasoning_effort": "low"}
+            ),
+            "Low",
+        )
+
+    def test_high_is_forwarded(self):
+        self.assertEqual(
+            self._effort_line(
+                {"messages": [{"role": "user", "content": "hi"}],
+                 "reasoning_effort": "high"}
+            ),
+            "High",
+        )
+
+    def test_default_when_absent(self):
+        self.assertEqual(
+            self._effort_line({"messages": [{"role": "user", "content": "hi"}]}),
+            "Max",
+        )

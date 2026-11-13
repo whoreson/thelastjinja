@@ -167,6 +167,34 @@ SPARK = SyntaxProfile(
 )
 
 # ---------------------------------------------------------------------------
+# GLM (Zhipu / Z.ai) chat template
+#
+#   [gMASK]<sop><|system|>...<|user|>Hi<|assistant|><think>...
+#   <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>
+#
+# Shares the tool-call syntax with Spark, but the turn delimiters are GLM's own
+# and must be stops: without them the model runs past the end of the assistant
+# turn and starts writing a fake ``<|user|>`` message.
+# ---------------------------------------------------------------------------
+GLM = SyntaxProfile(
+    name="glm",
+    description="GLM: <|assistant|> + <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>",
+    call_start="<tool_call>",
+    call_end="</tool_call>",
+    function_tag_open="",
+    function_name_terminator="<arg_key>",
+    function_tag_close="",
+    argument_style="spark_xml_params",
+    parameter_tag_open="<arg_key>",
+    parameter_tag_close="</arg_key>",
+    value_tag_open="<arg_value>",
+    value_tag_close="</arg_value>",
+    reasoning_start="<think>",
+    reasoning_end="</think>",
+    turn_stop_strings=("<|user|>", "<|observation|>", "<|system|>"),
+)
+
+# ---------------------------------------------------------------------------
 # GPT-OSS / harmony
 #   <|start|>assistant<|channel|>commentary to=functions.get_weather
 #   <|constrain|>json<|message|>{"city":"Budapest"}<|call|>
@@ -302,6 +330,7 @@ _BUILTINS: Dict[str, SyntaxProfile] = {
         LFM2,
         GEMMA4,
         SPARK,
+        GLM,
         PLAIN_JSON,
     )
 }
@@ -338,6 +367,12 @@ _ALIASES: Dict[str, str] = {
     "spark": "spark",
     "spark-x": "spark",
     "spark-x2.6": "spark",
+    "glm": "glm",
+    "chatglm": "glm",
+    "glm-4": "glm",
+    "glm-5": "glm",
+    "zhipu": "glm",
+    "z.ai": "glm",
 }
 
 
@@ -397,6 +432,9 @@ def detect_profile_from_template(source: str) -> Optional[str]:
         ("ministral3", ("[THINK]", "[ARGS]")),
         ("gemma4", ("<|tool_call>", "call:")),
         ("lfm2", ("<|tool_call_start|>",)),
+        # GLM uses Spark's tool-call tags but its own turn delimiters, so it has
+        # to be detected before the generic ``<arg_key>`` check.
+        ("glm", ("[gMASK]", "<|observation|>", "<|assistant|>")),
         ("spark", ("<arg_key>", "<arg_value>")),
         ("qwen", ("<function=", "<parameter=")),
         ("mistral", ("[TOOL_CALLS]",)),

@@ -110,6 +110,11 @@ def build_constraints(
     for value in request_stops:
         add(value)
 
+    # Turn delimiters end the assistant's turn regardless of tools - without
+    # them the model keeps generating the next speaker's message.
+    for value in profile.turn_stop_strings:
+        add(value)
+
     if has_tools:
         for terminator in profile.stop_strings(stop_at_call_end=stop_at_call_end):
             add(terminator)

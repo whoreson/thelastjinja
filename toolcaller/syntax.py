@@ -73,6 +73,12 @@ class SyntaxProfile:
     #: ``function_tag_close`` and ``eos_token`` as text-level terminators.
     extra_stop_strings: Sequence[str] = field(default_factory=tuple)
 
+    #: Turn delimiters that end the assistant's turn (e.g. GLM's ``<|user|>``).
+    #: Unlike :attr:`extra_stop_strings` these are *always* stops, with or
+    #: without tools: without them the model runs past its own turn and starts
+    #: writing the next speaker's message.
+    turn_stop_strings: Sequence[str] = field(default_factory=tuple)
+
     #: Strip a leading whitespace-delimited tag such as ``<|channel|>final``
     #: from the content (harmony style final channels).
     strip_content_prefixes: Sequence[str] = field(default_factory=tuple)
@@ -146,14 +152,15 @@ class SyntaxProfile:
         qualify: they legitimately occur mid-answer.
         """
         terms = set(self.extra_stop_strings)
+        terms.update(self.turn_stop_strings)
         if stop_at_call_end:
             terms.add(self.call_end)
         return sorted((t for t in terms if t), key=len, reverse=True)
 
     def to_dict(self) -> Dict[str, Any]:
         data = dict(self.__dict__)
-        for key in ("extra_stop_strings", "strip_content_prefixes",
-                    "content_cleanup", "call_id_keys"):
+        for key in ("extra_stop_strings", "turn_stop_strings",
+                    "strip_content_prefixes", "content_cleanup", "call_id_keys"):
             data[key] = list(data[key])
         return data
 

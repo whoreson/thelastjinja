@@ -305,6 +305,23 @@ Pi then sends `reasoning_effort: "none"`, which this proxy disables thinking
 for. (With `thinkingFormat: "qwen"` Pi sends `enable_thinking: false`, also
 handled.)
 
+**Templates without an on/off switch.** GLM's template always prefills
+`<think>` and only reads `reasoning_effort` (`low` / `high`, default `max`), so
+`reasoning_effort` is forwarded even when `enable_thinking` is unsupported.
+Such templates cannot be told to skip thinking; the effort level is the only
+control.
+
+### Model-specific turn delimiters
+
+Some models end an assistant turn with their own special token rather than the
+EOS token. GLM, for instance, emits `<|user|>` (or `<|observation|>`) and will
+gladly keep writing a fake user turn if generation is not stopped there.
+
+Profiles carry these in `turn_stop_strings`, which are stops **regardless of
+whether tools are present** (unlike `extra_stop_strings`, which only apply with
+tools). The delimiter is also stripped from the answer, because the raw text is
+reconstructed as `content + stop_word` so reasoning and tool markers survive.
+
 ### Known limitations
 
 * **Thinking is pre-filled by many templates.** Qwen's generation prompt ends

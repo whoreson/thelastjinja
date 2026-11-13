@@ -279,6 +279,12 @@ class SyntaxParser:
             out = out.replace(marker, "")
         for terminator in self._variants_terms:
             out = out.replace(terminator, "")
+        # Turn delimiters (e.g. GLM's ``<|user|>``) end the assistant's turn.
+        # The raw text is reconstructed as ``content + stop_word`` so reasoning
+        # and tool markers survive, which means the delimiter itself has to be
+        # removed from the answer.
+        for terminator in self.profile.turn_stop_strings:
+            out = out.replace(terminator, "")
         if self.eos_token:
             out = out.replace(self.eos_token, "")
         return out

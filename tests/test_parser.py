@@ -515,3 +515,71 @@ class TestSparkProfile(unittest.TestCase):
             detect_profile_from_template("<arg_key>city</arg_key><arg_value>"),
             "spark",
         )
+
+
+class TestGlmProfile(unittest.TestCase):
+    """GLM shares Spark's tool syntax but has its own turn delimiters."""
+
+    def setUp(self):
+        self.parser = SyntaxParser(get_profile("glm"), strict=False)
+
+    def test_tool_call_syntax_is_shared_with_spark(self):
+        calls = self.parser.parse(
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>Budapest</arg_value></tool_call>"
+        ).tool_calls
+        self.assertEqual(calls[0].name, "get_weather")
+        self.assertEqual(calls[0].arguments, {"city": "Budapest"})
+
+    def test_leading_close_reasoning(self):
+        # The template prefills "<think>", so the model emits "</think>" first.
+        parsed = self.parser.parse("</think>Hi there!", reasoning_format="auto")
+        self.assertEqual(parsed.reasoning_content, "")
+        self.assertEqual(parsed.content, "Hi there!")
+
+    def test_turn_delimiter_never_leaks_into_content(self):
+        parsed = self.parser.parse(
+            "reasoning</think>Hi there!<|user|>", reasoning_format="auto"
+        )
+        self.assertEqual(parsed.reasoning_content, "reasoning")
+        self.assertEqual(parsed.content, "Hi there!")
+
+    def test_detected_from_template(self):
+        from toolcaller.profiles import detect_profile_from_template
+
+        self.assertEqual(detect_profile_from_template("[gMASK]<sop>..."), "glm")
+        # Spark templates must still be detected as spark.
+        self.assertEqual(
+            detect_profile_from_template("<arg_key>k</arg_key><arg_value>"),
+            "spark",
+        )
+
+
+class TestTurnStops(unittest.TestCase):
+    """Turn delimiters are stops even without tools."""
+
+    def test_glm_turn_stops_without_tools(self):
+        from toolcaller.constraints import build_constraints
+
+        constraints = build_constraints(
+            get_profile("glm"), eos_token="<|endoftext|>", has_tools=False
+        )
+        self.assertIn("<|user|>", constraints.stops)
+        self.assertIn("<|observation|>", constraints.stops)
+
+    def test_glm_turn_stops_with_tools(self):
+        from toolcaller.constraints import build_constraints
+
+        constraints = build_constraints(
+            get_profile("glm"), eos_token="<|endoftext|>", has_tools=True
+        )
+        for stop in ("<|user|>", "<|observation|>", "<|system|>"):
+            self.assertIn(stop, constraints.stops)
+
+    def test_profiles_without_turn_stops_are_unchanged(self):
+        from toolcaller.constraints import build_constraints
+
+        constraints = build_constraints(
+            get_profile("spark"), eos_token="<|endoftext|>", has_tools=False
+        )
+        self.assertEqual(constraints.stops, ["<|endoftext|>"])

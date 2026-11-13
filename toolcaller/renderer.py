@@ -409,13 +409,18 @@ class PromptRenderer:
         }
         if tools:
             context["tools"] = _tools_to_json(tools)
+        # Thinking is controlled by several client conventions; see
+        # ``resolve_thinking``.
+        enabled, effort = resolve_thinking(request)
         if self.caps.supports_enable_thinking:
-            # Thinking is controlled by several client conventions; see
-            # ``resolve_thinking``.  Default is on unless the client says off.
-            enabled, effort = resolve_thinking(request)
+            # Templates with ``enable_thinking`` get it explicitly; default on
+            # unless the client asked otherwise.
             context["enable_thinking"] = enabled
-            if enabled and effort:
-                context["reasoning_effort"] = effort
+        if effort:
+            # ``reasoning_effort`` is separate: some templates (GLM) have no
+            # on/off switch at all and only honour the effort *level*, so it
+            # must be forwarded even when ``enable_thinking`` is unsupported.
+            context["reasoning_effort"] = effort
         context.update(self.extra_context if now is None else _extra_context(now))
         kwargs = dict(self.default_template_kwargs)
         if template_kwargs:
