@@ -141,7 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument(
         "--no-stream",
         action="store_true",
-        help="Disable streaming (wait for full response)",
+        help=(
+            "Disable streaming: fetch/wait for the full response and return one "
+            "JSON body. With --serve, the daemon ignores the client's "
+            "'stream' field and always answers with a single chat.completion."
+        ),
     )
     srv.add_argument(
         "--max-tokens",
@@ -627,6 +631,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         stop_at_call_end=args.stop_at_call_end,
         strip_generation_thinking=args.strip_generation_thinking,
         cors_origins=cors_origins,
+        no_stream=args.no_stream,
         debug=args.debug,
     )
 

@@ -74,6 +74,9 @@ class ServerConfig:
     strip_generation_thinking: bool = False
     max_request_body: int = 16 * 1024 * 1024  # 16 MB
     cors_origins: Optional[List[str]] = None
+    # Force non-streaming: ignore the client's "stream" field and always
+    # return a single JSON chat.completion response.
+    no_stream: bool = False
     debug: bool = False
 
 
@@ -91,6 +94,23 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size: int = 128
+
+
+# ---------------------------------------------------------------------------
+# Request routing helpers
+# ---------------------------------------------------------------------------
+
+def stream_requested(request: Dict[str, Any], config: ServerConfig) -> bool:
+    """Decide whether to answer with SSE.
+
+    The client asks for streaming via ``"stream": true``, but the daemon can
+    force non-streaming with ``--no-stream`` (``config.no_stream``).  In that
+    case every request is answered with a single ``chat.completion`` JSON body
+    regardless of what the client asked for.
+    """
+    if config.no_stream:
+        return False
+    return bool(request.get("stream", False))
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +185,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": f"invalid JSON: {exc}"})
             return
 
-        stream = bool(request.get("stream", False))
+        stream = stream_requested(request, self.server.config)
 
         if stream:
             self._stream_response(request, pipeline)

@@ -229,8 +229,16 @@ generation prompt), `completion` (raw server data), `warnings` and `to_response(
 --strip-generation-thinking                 make the model emit <think> itself
 --response-format {openai,simple,raw,both}  output shape
 --stream                                    stream from the server
+--no-stream                                 disable streaming (one full response)
+--serve                                     run the OpenAI-compatible daemon
 --inspect-template / --check-server / --list-profiles / --dump-profile NAME
 ```
+
+`--no-stream` applies to both modes. On the CLI it fetches the whole
+completion in a single `/completion` call (upstream receives `"stream": false`).
+With `--serve` the daemon ignores `"stream": true` from clients and always
+answers with one `chat.completion` JSON body (`Content-Type: application/json`)
+instead of an SSE stream.
 
 ### Known limitations
 
