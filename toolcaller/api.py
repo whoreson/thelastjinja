@@ -281,6 +281,7 @@ class ChatPipeline:
         client: Optional[CompletionClient] = None,
         timeout: float = 3600.0,
         discover_tokens: bool = True,
+        dump: bool = False,
         debug: bool = False,
     ) -> None:
         if template_source is None:
@@ -293,6 +294,8 @@ class ChatPipeline:
             self.template_path = None
 
         self.client = client or CompletionClient(base_url, timeout=timeout)
+        # ``--dump``: echo upstream replies (JSON or each SSE event) to stderr.
+        self.client.dump = dump
 
         if hint_mode not in HINT_MODES:
             raise ConfigError(f"hint_mode must be one of {HINT_MODES}")

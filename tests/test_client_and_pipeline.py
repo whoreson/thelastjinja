@@ -109,25 +109,6 @@ class TestCompletionClient(unittest.TestCase):
             client.complete("p")
         self.assertIn("500", str(ctx.exception))
 
-    def test_grammar_and_triggers_forwarded(self):
-        client, session = self._client([FakeResponse({"content": ""})])
-        client.complete(
-            "p",
-            grammar="root ::= x",
-            grammar_triggers=[{"type": 1, "value": "<tool_call>"}],
-            preserved_tokens=["<tool_call>"],
-        )
-        body = session.calls[0]["json"]
-        self.assertEqual(body["grammar"], "root ::= x")
-        self.assertEqual(body["grammar_triggers"], [{"type": 1, "value": "<tool_call>"}])
-        self.assertEqual(body["preserved_tokens"], ["<tool_call>"])
-
-    def test_sampling_params_forwarded(self):
-        client, session = self._client([FakeResponse({"content": ""})])
-        client.complete("p", sampling={"temperature": 0.0, "top_k": 1})
-        body = session.calls[0]["json"]
-        self.assertEqual(body["temperature"], 0.0)
-        self.assertEqual(body["top_k"], 1)
 
     def test_tokenize_usable(self):
         client, _ = self._client(
@@ -198,6 +179,87 @@ class TestCompletionClient(unittest.TestCase):
         self.assertIn("generated 5 tok", text)
         self.assertEqual(format_timings({}), "")
 
+
+    def test_grammar_and_triggers_forwarded(self):
+        client, session = self._client([FakeResponse({"content": ""})])
+        client.complete(
+            "p",
+            grammar="root ::= x",
+            grammar_triggers=[{"type": 1, "value": "<tool_call>"}],
+            preserved_tokens=["<tool_call>"],
+        )
+        body = session.calls[0]["json"]
+        self.assertEqual(body["grammar"], "root ::= x")
+        self.assertEqual(body["grammar_triggers"], [{"type": 1, "value": "<tool_call>"}])
+        self.assertEqual(body["preserved_tokens"], ["<tool_call>"])
+
+    def test_sampling_params_forwarded(self):
+        client, session = self._client([FakeResponse({"content": ""})])
+        client.complete("p", sampling={"temperature": 0.0, "top_k": 1})
+        body = session.calls[0]["json"]
+        self.assertEqual(body["temperature"], 0.0)
+        self.assertEqual(body["top_k"], 1)
+
+
+class TestClientDump(unittest.TestCase):
+    """``--dump`` echoes upstream replies to stderr."""
+
+    def _run(self, responses, *, dump: bool, stream: bool = False) -> str:
+        import contextlib
+        import io
+
+        session = FakeSession(responses)
+        client = CompletionClient("http://x", session=session, dump=dump)
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            if stream:
+                client.complete_stream("p")
+            else:
+                client.complete("p")
+        return buffer.getvalue()
+
+    def test_nonstream_reply_is_dumped(self):
+        out = self._run([FakeResponse({"content": "hello"})], dump=True)
+        self.assertIn("----- upstream reply -----", out)
+        self.assertIn('"content": "hello"', out)
+        self.assertIn("----- end upstream reply -----", out)
+
+    def test_nothing_dumped_without_flag(self):
+        out = self._run([FakeResponse({"content": "hello"})], dump=False)
+        self.assertEqual(out, "")
+
+    def test_each_sse_event_is_dumped(self):
+        lines = [
+            'data: {"content": "hel"}',
+            "",
+            'data: {"content": "lo"}',
+            "",
+            'data: {"content": "", "stop": true}',
+            "",
+        ]
+        resp = FakeResponse({"content": "hello"}, lines=lines)
+        out = self._run([resp], dump=True, stream=True)
+        self.assertEqual(out.count("----- upstream sse -----"), 3)
+        self.assertIn('"content": "hel"', out)
+        self.assertIn('"content": "lo"', out)
+
+    def test_sse_not_dumped_without_flag(self):
+        lines = ['data: {"content": "hi"}', ""]
+        resp = FakeResponse({"content": "hi"}, lines=lines)
+        out = self._run([resp], dump=False, stream=True)
+        self.assertEqual(out, "")
+
+    def test_invalid_json_reply_is_still_dumped(self):
+        import contextlib
+        import io
+
+        session = FakeSession([FakeResponse("not json")])
+        client = CompletionClient("http://x", session=session, dump=True)
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            with self.assertRaises(ServerError):
+                client.complete("p")
+        self.assertIn("not json", buffer.getvalue())
 
 class PipelineFakeClient(CompletionClient):
     """Client that returns a canned raw completion."""

@@ -234,19 +234,29 @@ A client that asked for SSE always gets SSE (OpenAI SDK clients - including
 agentic harnesses such as Pi - iterate the body as a stream and fail with
 "Stream ended without finish_reason" if handed a plain JSON object).
 
-### Inspecting the request
+### Inspecting traffic (`--dump`)
 
-`--dump` prints the JSON request as received, verbatim, to **stderr**, before
-any processing.  stderr keeps stdout machine-readable, so piping the result
-still works:
+`--dump` writes what the proxy sends and receives to **stderr**, verbatim, so
+stdout stays machine-readable and piping still works:
+
+* `----- request -----` - the incoming chat-completion JSON, before processing.
+* `----- upstream reply -----` - the backend's whole `/completion` reply (one
+  block per request, when the backend is not streamed).
+* `----- upstream sse -----` - one block per SSE event from the backend, in the
+  order they arrive (when the backend is streamed, the default).
 
 ```bash
 python3 -m toolcaller -t qwen.jinja --chat examples/request_tool_call.json \
     --dump --render-only | jq .profile
 ```
 
-It applies to the daemon too, where each `POST /v1/chat/completions` body is
-written to the server's stderr (never into the SSE/JSON response).
+It applies to the daemon too, where each `POST /v1/chat/completions` body and
+its upstream replies are written to the server's stderr (never into the
+SSE/JSON response body):
+
+```bash
+./go.sh --dump 2>session.log
+```
 
 ### Streaming format (in-band tool calls)
 

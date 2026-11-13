@@ -260,8 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump",
         action="store_true",
         help=(
-            "Print the received JSON request to stderr, as-is, before processing "
-            "(stderr keeps stdout clean)"
+            "Print received JSON to stderr: the incoming request body and every "
+            "reply from the upstream /completion endpoint (one line per SSE "
+            "event when streaming). stderr keeps stdout clean"
         ),
     )
 
@@ -541,6 +542,7 @@ def cmd_complete(args: argparse.Namespace, request: Dict[str, Any]) -> str:
         stop_at_call_end=args.stop_at_call_end,
         strip_generation_thinking=args.strip_generation_thinking,
         timeout=args.timeout,
+        dump=args.dump,
         debug=args.debug,
     )
     if not args.template:

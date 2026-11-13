@@ -610,6 +610,7 @@ def create_server(config: ServerConfig) -> ThreadedHTTPServer:
         stop_at_call_end=config.stop_at_call_end,
         strip_generation_thinking=config.strip_generation_thinking,
         timeout=config.backend_timeout,
+        dump=config.dump,
         debug=config.debug,
         client=CompletionClient(
             config.backend_url,

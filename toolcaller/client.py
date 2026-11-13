@@ -28,6 +28,7 @@ a ``cancelled`` warning so the upstream model stops spinning.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
@@ -83,16 +84,34 @@ class CompletionClient:
         api_key: Optional[str] = None,
         completion_path: str = "/completion",
         tokenize_path: str = "/tokenize",
+        dump: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.session = session or requests.Session()
         self.completion_url = self.base_url + completion_path
         self.tokenize_url = self.base_url + tokenize_path
+        #: ``--dump``: echo every upstream reply to stderr as it arrives.
+        self.dump = dump
         if api_key:
             self.session.headers["Authorization"] = f"Bearer {api_key}"
         self._vocab_cache: Dict[str, Optional[List[int]]] = {}
         self._tokenize_supported: Optional[bool] = None
+
+    # -- dump --------------------------------------------------------------
+    def _dump(self, kind: str, text: str) -> None:
+        """Write one upstream reply line to stderr (``--dump``)."""
+        if not self.dump:
+            return
+        try:
+            sys.stderr.write(f"----- upstream {kind} -----\n")
+            sys.stderr.write(text)
+            if not text.endswith("\n"):
+                sys.stderr.write("\n")
+            sys.stderr.write(f"----- end upstream {kind} -----\n")
+            sys.stderr.flush()
+        except Exception:  # pragma: no cover - stderr closed
+            pass
 
     # -- discovery ---------------------------------------------------------
     def props(self) -> Dict[str, Any]:
@@ -361,7 +380,10 @@ class CompletionClient:
         try:
             payload = json.loads(raw)
         except ValueError as exc:
+            self._dump("reply", raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw))
             raise ServerError(f"POST {url}: invalid JSON response: {exc}") from exc
+        if isinstance(raw, bytes):
+            self._dump("reply", raw.decode("utf-8", "replace"))
         if isinstance(payload, dict) and "error" in payload:
             error = payload["error"]
             message = error.get("message") if isinstance(error, dict) else str(error)
@@ -383,8 +405,7 @@ class CompletionClient:
             pass
         return f"HTTP {response.status_code}: {text[:800]}"
 
-    @staticmethod
-    def _iter_sse(response: "requests.Response", *, cancel: Optional[threading.Event] = None) -> Iterator[Any]:
+    def _iter_sse(self, response: "requests.Response", *, cancel: Optional[threading.Event] = None) -> Iterator[Any]:
         data_lines: List[str] = []
         for raw_line in response.iter_lines(decode_unicode=True):
             if cancel and cancel.is_set():
@@ -396,6 +417,8 @@ class CompletionClient:
                 if data_lines:
                     chunk = "\n".join(data_lines)
                     data_lines = []
+                    # --dump: every upstream SSE event, as received.
+                    self._dump("sse", chunk)
                     yield from _decode_sse_payload(chunk)
                 continue
             if line.startswith(":"):
@@ -408,7 +431,9 @@ class CompletionClient:
                 # server that streams bare JSON lines
                 data_lines.append(line)
         if data_lines:
-            yield from _decode_sse_payload("\n".join(data_lines))
+            tail = "\n".join(data_lines)
+            self._dump("sse", tail)
+            yield from _decode_sse_payload(tail)
 
     def _parse_response(
         self, payload: Dict[str, Any], *, streamed_text: Optional[str] = None
