@@ -1,45 +1,28 @@
 # toolcaller
 
 Turn **OpenAI chat-completion JSON** into a **raw text completion** on servers
-that only speak `/completion` — and get proper **tool calls** back.
+that only speak `/completion`, and get proper **tool calls** back.
 
-```
-OpenAI chat JSON ──► jinja template ──► prompt ──► POST /completion ──► raw text
-                                                                          │
-                                            ◄── model-specific parser ◄───┘
-                                     OpenAI chat.completion JSON
-```
-
-Built for the exact situation this was written in: `ik_llama.cpp` /
-`llama.cpp` running **without `--jinja`**, no chat-completions endpoint, no
-tool-call parsing — just `POST /completion` and a GGUF with an embedded chat
-template (tested against Qwen 3.6 27B on CPU at ~2 tok/s).
-
----
-
-## Why this is not just "render and POST"
-
-| Problem | What a naive wrapper does | What this does |
-|---|---|---|
-| **Tool-call format** | model emits free-form text, client gets nothing | 12 declarative syntax **profiles** (Qwen XML, Spark XML, Mistral `[TOOL_CALLS]`, DeepSeek DSML, GPT-OSS harmony, Kimi, LFM2, Gemma, Llama 3, Hermes, …) + JSON recovery fallback |
-| **Stopping** | stops on `</tool_call>`, breaking parallel calls; or never stops | stop list derived from the template + profile; `</function>` and `</tool_call>` are *never* stop strings by default |
-| **EOS handling** | `content` from `/completion` already excludes EOS | raw text reconstructed (`content + stop_word + eos`) so reasoning/tool markers survive |
-| **Thinking models** | prompt ends with `<think>` so `reasoning_content` is always empty | generation prompt diffed out, pre-filled `<think>` handled, `reasoning_content` split correctly |
-| **Template dialects** | plain `jinja2` breaks (`raise_exception`, `tojson` escaping, `trim_blocks`) | Minja-compatible environment (`raise_exception`, `strftime_now`, compact unescaped `tojson`, no block trimming) |
-| **Not every template is the same** | passing `tools` to a template that ignores them silently loses them | capability probes (port of `common/jinja/caps.cpp`); fails loudly instead of dropping data |
-| **Model won't follow the format** | — | optional profile-derived system-prompt hint (`--hint-mode`) and lazy GBNF grammar (`--grammar-style gbnf`) |
+Built for https://github.com/whoreson/picolm: no chat-completions endpoint, no
+tool-call parsing, just `POST /completion` and a GGUF with an embedded chat
+template.
 
 ---
 
 ## Install / run
 
-Python 3.10+ with `jinja2` and `requests` (both already present in
-`~/python-3.10.7`). No other dependencies.
+Python 3.10+ with `jinja2` and `requests`
 
 ```bash
-cd ~/jin
-~/python-3.10.7/bin/python3 -m toolcaller --help
+picolm --server qwen.gguf
+./go.sh
 ```
+
+Point your client to http://127.0.0.1:8081
+
+---
+AI slop below, didn't read
+---
 
 ### Inspect the server first
 
