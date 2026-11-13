@@ -10,7 +10,7 @@ from toolcaller.environment import TemplateEnvironment
 from toolcaller.errors import TemplateError
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-QWEN_TEMPLATE = os.path.join(HERE, "chat_template.jinja")
+QWEN_TEMPLATE = os.path.join(HERE, "qwen.jinja")
 
 # A tiny template that has tools + system + tool calls, ChatML style.
 TOOL_TEMPLATE = """

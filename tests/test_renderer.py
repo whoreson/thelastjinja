@@ -16,8 +16,8 @@ from toolcaller.renderer import (
 )
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-QWEN_TEMPLATE = os.path.join(HERE, "chat_template.jinja")
-SPARK_TEMPLATE = os.path.join(HERE, "spark.j")
+QWEN_TEMPLATE = os.path.join(HERE, "qwen.jinja")
+SPARK_TEMPLATE = os.path.join(HERE, "spark.jinja")
 
 CHATML = (
     "{%- for message in messages -%}"

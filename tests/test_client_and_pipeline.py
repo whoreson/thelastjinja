@@ -13,7 +13,7 @@ from toolcaller.errors import ServerError
 from toolcaller.renderer import RenderResult
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-QWEN_TEMPLATE = os.path.join(HERE, "chat_template.jinja")
+QWEN_TEMPLATE = os.path.join(HERE, "qwen.jinja")
 
 
 class FakeResponse:
